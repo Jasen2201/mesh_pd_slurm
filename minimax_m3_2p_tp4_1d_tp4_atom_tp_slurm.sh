@@ -47,7 +47,7 @@ EXTRA_SERVER_ARGS="${EXTRA_SERVER_ARGS:-}"
 
 ISL_LIST="${ISL_LIST:-8192}"
 OSL="${OSL:-1024}"
-CONC_LIST="${CONC_LIST:-64,128,256,512,768,1024}"
+CONC_LIST="${CONC_LIST:-64,128,256,512,768}"
 RANDOM_RANGE_RATIO="${RANDOM_RANGE_RATIO:-0.8}"
 
 WAIT_SERVER_TIMEOUT="${WAIT_SERVER_TIMEOUT:-1800}"
@@ -135,6 +135,7 @@ mkdir -p /workspace/logroot/prefill1
 export HIP_VISIBLE_DEVICES=${PREFILL1_GPU_IDS}
 export PYTHONUNBUFFERED=1
 export HSA_NO_SCRATCH_RECLAIM=1
+export AITER_QUICK_REDUCE_QUANTIZATION=INT4
 export ATOM_HOST_IP=${PREFILL_IP}
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 
@@ -166,6 +167,7 @@ mkdir -p /workspace/logroot/prefill2
 export HIP_VISIBLE_DEVICES=${PREFILL2_GPU_IDS}
 export PYTHONUNBUFFERED=1
 export HSA_NO_SCRATCH_RECLAIM=1
+export AITER_QUICK_REDUCE_QUANTIZATION=INT4
 export ATOM_HOST_IP=${PREFILL_IP}
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 
@@ -197,6 +199,7 @@ mkdir -p /workspace/logs
 export HIP_VISIBLE_DEVICES=${DECODE_GPU_IDS}
 export PYTHONUNBUFFERED=1
 export HSA_NO_SCRATCH_RECLAIM=1
+export AITER_QUICK_REDUCE_QUANTIZATION=INT4
 export ATOM_HOST_IP=${DECODE_IP}
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 
