@@ -2,21 +2,21 @@
 #SBATCH --job-name=minimax-m3-2p-tp4-1d-tp4-atom-dpa
 #SBATCH --account=amd-frameworks
 #SBATCH --partition=amd-frameworks
-#SBATCH --nodes=2
-#SBATCH --ntasks=2
+#SBATCH --nodes=3
+#SBATCH --ntasks=3
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=114
 #SBATCH --gres=gpu:8
 #SBATCH --exclusive
 #SBATCH --time=04:00:00
-#SBATCH --nodelist=mia1-p02-g42,mia1-p02-g44
+#SBATCH --nodelist=mia1-p02-g42,mia1-p02-g44,mia1-p02-g47
 #SBATCH --output=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_2p_tp4_1d_tp4_atom_dpa-%j.out
 #SBATCH --error=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_2p_tp4_1d_tp4_atom_dpa-%j.err
 #
 # 2P+1D PD-disaggregated benchmark for MiniMax-M3-MXFP4 on ATOM with DPA.
-#   Node1 (g42): prefill1 (GPU 0-3, TP4+DPA) + prefill2 (GPU 4-7, TP4+DPA) + router
-#   Node2 (g44): decode   (GPU 0-3, TP4+DPA)
-#   Each instance: attention=DP4, MoE=TP4 sharding via --enable-dp-attention
+#   prefill: TP=4 (2 instances, 1 node each), decode: TP=4 (1 instance), --enable-dp-attention.
+#   3 nodes total: g42=prefill-1, g44=prefill-2, g47=decode.
+#   Each instance runs in its own container so ATOM's hardcoded port 29500 never conflicts.
 #
 # Usage:
 #   mkdir -p /it-share/yajizhan/slurm_minimax_logs
@@ -26,22 +26,20 @@ set -euo pipefail
 
 # ======================== configuration ========================
 MODEL_PATH="${MODEL_PATH:-/mnt/models/MiniMax-M3-MXFP4}"
-DOCKER_IMAGE="${DOCKER_IMAGE:-rocm/atom-dev:MiniMax-M3-20260619}"
+DOCKER_IMAGE="${DOCKER_IMAGE:-rocm/atom-dev:M3DP}"
 CONTAINER="${CONTAINER:-atom_mesh_minimax_m3_2p1d_tp4_dpa_${SLURM_JOB_ID}}"
 
 PREFILL_TP="${PREFILL_TP:-4}"
 DECODE_TP="${DECODE_TP:-4}"
-PREFILL1_PORT="${PREFILL1_PORT:-8010}"
-PREFILL2_PORT="${PREFILL2_PORT:-8011}"
+PREFILL_PORT="${PREFILL_PORT:-8010}"
 DECODE_PORT="${DECODE_PORT:-8020}"
 ROUTER_PORT="${ROUTER_PORT:-8000}"
-HANDSHAKE_PORT1="${HANDSHAKE_PORT1:-6301}"
-HANDSHAKE_PORT2="${HANDSHAKE_PORT2:-6305}"  # must be >= HANDSHAKE_PORT1 + PREFILL_TP to avoid mooncake port collision
+HANDSHAKE_PORT="${HANDSHAKE_PORT:-6301}"
 
 MEM_FRACTION="${MEM_FRACTION:-0.8}"
 BLOCK_SIZE="${BLOCK_SIZE:-128}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
-MAX_NUM_SEQS="${MAX_NUM_SEQS:-128}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-256}"
 DECODE_MAX_NUM_SEQS="${DECODE_MAX_NUM_SEQS:-1024}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-32768}"
 EXTRA_SERVER_ARGS="${EXTRA_SERVER_ARGS:-}"
@@ -66,18 +64,20 @@ LOG_ROOT="${LOG_ROOT:-/it-share/yajizhan/slurm_minimax_logs/$(date +%m%d)_minima
 # ======================== pre-flight ========================
 echo "=== Job ${SLURM_JOB_ID} starting on $(hostname) at $(date -Is) ==="
 mapfile -t NODES < <(scontrol show hostnames "$SLURM_JOB_NODELIST")
-if [[ "${#NODES[@]}" -ne 2 ]]; then
-    echo "ERROR: expected 2 nodes, got ${#NODES[@]}: ${NODES[*]}" >&2
+if [[ "${#NODES[@]}" -ne 3 ]]; then
+    echo "ERROR: expected 3 nodes, got ${#NODES[@]}: ${NODES[*]}" >&2
     exit 1
 fi
-PREFILL_NODE="${NODES[0]}"   # g42: prefill1 (GPU 0-3) + prefill2 (GPU 4-7) + router
-DECODE_NODE="${NODES[1]}"    # g44: decode (GPU 0-3)
+PREFILL_NODE_1="${NODES[0]}"
+PREFILL_NODE_2="${NODES[1]}"
+DECODE_NODE="${NODES[2]}"
+ALL_NODES=("$PREFILL_NODE_1" "$PREFILL_NODE_2" "$DECODE_NODE")
 
-mkdir -p "${LOG_ROOT}"/{prefill1,prefill2,decode,router,bench,gsm8k,scripts}
+mkdir -p "${LOG_ROOT}"/{prefill_1,prefill_2,decode,router,bench,gsm8k,scripts}
 
 # ======================== pre-cleanup ========================
-echo "=== pre-cleanup: force-stopping all docker containers on both nodes ==="
-for node in "$PREFILL_NODE" "$DECODE_NODE"; do
+echo "=== pre-cleanup: force-stopping all docker containers on all nodes ==="
+for node in "${ALL_NODES[@]}"; do
     srun --nodelist="$node" --nodes=1 --ntasks=1 --time=00:03:00 bash -c '
         hostname
         running=$(docker ps -q)
@@ -100,100 +100,76 @@ for node in "$PREFILL_NODE" "$DECODE_NODE"; do
 done
 echo "=== pre-cleanup done ==="
 
-PREFILL_IP=$(srun --nodelist="$PREFILL_NODE" --nodes=1 --ntasks=1 \
+PREFILL_IP_1=$(srun --nodelist="$PREFILL_NODE_1" --nodes=1 --ntasks=1 \
+    bash -c "ip route get 1.1.1.1 | awk '/src/ {print \$7; exit}'")
+PREFILL_IP_2=$(srun --nodelist="$PREFILL_NODE_2" --nodes=1 --ntasks=1 \
     bash -c "ip route get 1.1.1.1 | awk '/src/ {print \$7; exit}'")
 DECODE_IP=$(srun --nodelist="$DECODE_NODE" --nodes=1 --ntasks=1 \
     bash -c "ip route get 1.1.1.1 | awk '/src/ {print \$7; exit}'")
 
 cat <<INFO
 === Configuration ===
-PREFILL1: ${PREFILL_NODE} GPU 0-3 (IP=${PREFILL_IP}, TP=${PREFILL_TP}+DPA, port=${PREFILL1_PORT}, handshake=${HANDSHAKE_PORT1})
-PREFILL2: ${PREFILL_NODE} GPU 4-7 (IP=${PREFILL_IP}, TP=${PREFILL_TP}+DPA, port=${PREFILL2_PORT}, handshake=${HANDSHAKE_PORT2})
-DECODE  : ${DECODE_NODE}  GPU 0-3 (IP=${DECODE_IP},  TP=${DECODE_TP}+DPA,  port=${DECODE_PORT})
-ROUTER  : ${PREFILL_IP}:${ROUTER_PORT}
-MODEL   : ${MODEL_PATH}
-IMAGE   : ${DOCKER_IMAGE}
-BACKEND : atom (PD mooncake KV transfer, TP4+DPA)
-RUN_GSM8K  : ${RUN_GSM8K} (limit=${GSM8K_LIMIT:-all}, fewshot=${GSM8K_NUM_FEWSHOT})
+PREFILL-1 : ${PREFILL_NODE_1}  (IP=${PREFILL_IP_1}, TP=${PREFILL_TP}, port=${PREFILL_PORT})
+PREFILL-2 : ${PREFILL_NODE_2}  (IP=${PREFILL_IP_2}, TP=${PREFILL_TP}, port=${PREFILL_PORT})
+DECODE    : ${DECODE_NODE}     (IP=${DECODE_IP},    TP=${DECODE_TP},  port=${DECODE_PORT})
+ROUTER    : ${PREFILL_IP_1}:${ROUTER_PORT}
+MODEL     : ${MODEL_PATH}
+IMAGE     : ${DOCKER_IMAGE}
+BACKEND   : atom (PD mooncake KV transfer, DPA)
+RUN_GSM8K : ${RUN_GSM8K} (limit=${GSM8K_LIMIT:-all}, fewshot=${GSM8K_NUM_FEWSHOT})
 ISL/OSL/CONC : ${ISL_LIST} / ${OSL} / ${CONC_LIST}
-LOG_ROOT: ${LOG_ROOT}
+LOG_ROOT  : ${LOG_ROOT}
 =====================
 INFO
 
 # ======================== generate in-container scripts ========================
-PREFILL1_GPU_IDS="0,1,2,3"
-PREFILL2_GPU_IDS="4,5,6,7"
+PREFILL_GPU_IDS=$(seq -s, 0 $((PREFILL_TP - 1)))
 DECODE_GPU_IDS=$(seq -s, 0 $((DECODE_TP - 1)))
 
-cat > "${LOG_ROOT}/scripts/prefill1.sh" <<'PREFILL1_EOF'
+cat > "${LOG_ROOT}/scripts/prefill.sh.tmpl" <<'PREFILL_EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "[prefill1] IP=${PREFILL_IP} TP=${PREFILL_TP}+DPA port=${PREFILL1_PORT} GPU=0-3"
+echo "[prefill] IP=__PREFILL_HANDSHAKE_IP__ TP=${PREFILL_TP} port=${PREFILL_PORT}"
 
-mkdir -p /workspace/logroot/prefill1
+mkdir -p /workspace/logs
 
-export HIP_VISIBLE_DEVICES=${PREFILL1_GPU_IDS}
+export HIP_VISIBLE_DEVICES=${PREFILL_GPU_IDS}
 export PYTHONUNBUFFERED=1
 export HSA_NO_SCRATCH_RECLAIM=1
 export AITER_QUICK_REDUCE_QUANTIZATION=INT4
-export ATOM_HOST_IP=${PREFILL_IP}
+export ATOM_HOST_IP=__PREFILL_HANDSHAKE_IP__
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 
 rm -rf /root/.cache/atom/* 2>/dev/null || true
 
 python3 -m atom.entrypoints.openai_server \
     --model "${MODEL_PATH}" \
-    --host 0.0.0.0 --server-port "${PREFILL1_PORT}" \
+    --host 0.0.0.0 --server-port "${PREFILL_PORT}" \
     --trust-remote-code \
-    --tensor-parallel-size "${PREFILL_TP}" \
+    -tp "${PREFILL_TP}" \
     --enable-dp-attention \
     --gpu-memory-utilization "${MEM_FRACTION}" \
     --block-size "${BLOCK_SIZE}" \
     --max-model-len "${MAX_MODEL_LEN}" \
     --max-num-seqs "${MAX_NUM_SEQS}" \
     --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}" \
-    --kv-transfer-config '{"kv_role":"kv_producer","kv_connector":"mooncake","proxy_ip":"${PREFILL_IP}","handshake_port":${HANDSHAKE_PORT1}}' \
+    --kv-transfer-config '{"kv_role":"kv_producer","kv_connector":"mooncake","proxy_ip":"__PREFILL_HANDSHAKE_IP__","handshake_port":${HANDSHAKE_PORT}}' \
     ${EXTRA_SERVER_ARGS} \
-    2>&1 | tee /workspace/logroot/prefill1/prefill1.log
-PREFILL1_EOF
+    2>&1 | tee /workspace/logs/prefill.log
+PREFILL_EOF
 
-cat > "${LOG_ROOT}/scripts/prefill2.sh" <<'PREFILL2_EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-echo "[prefill2] IP=${PREFILL_IP} TP=${PREFILL_TP}+DPA port=${PREFILL2_PORT} GPU=4-7"
-
-mkdir -p /workspace/logroot/prefill2
-
-export HIP_VISIBLE_DEVICES=${PREFILL2_GPU_IDS}
-export PYTHONUNBUFFERED=1
-export HSA_NO_SCRATCH_RECLAIM=1
-export AITER_QUICK_REDUCE_QUANTIZATION=INT4
-export ATOM_HOST_IP=${PREFILL_IP}
-export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
-
-python3 -m atom.entrypoints.openai_server \
-    --model "${MODEL_PATH}" \
-    --host 0.0.0.0 --server-port "${PREFILL2_PORT}" \
-    --trust-remote-code \
-    --tensor-parallel-size "${PREFILL_TP}" \
-    --enable-dp-attention \
-    --gpu-memory-utilization "${MEM_FRACTION}" \
-    --block-size "${BLOCK_SIZE}" \
-    --max-model-len "${MAX_MODEL_LEN}" \
-    --max-num-seqs "${MAX_NUM_SEQS}" \
-    --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}" \
-    --kv-transfer-config '{"kv_role":"kv_producer","kv_connector":"mooncake","proxy_ip":"${PREFILL_IP}","handshake_port":${HANDSHAKE_PORT2}}' \
-    ${EXTRA_SERVER_ARGS} \
-    2>&1 | tee /workspace/logroot/prefill2/prefill2.log
-PREFILL2_EOF
+sed "s|__PREFILL_HANDSHAKE_IP__|${PREFILL_IP_1}|g" \
+    "${LOG_ROOT}/scripts/prefill.sh.tmpl" > "${LOG_ROOT}/scripts/prefill_1.sh"
+sed "s|__PREFILL_HANDSHAKE_IP__|${PREFILL_IP_2}|g" \
+    "${LOG_ROOT}/scripts/prefill.sh.tmpl" > "${LOG_ROOT}/scripts/prefill_2.sh"
+rm "${LOG_ROOT}/scripts/prefill.sh.tmpl"
 
 cat > "${LOG_ROOT}/scripts/decode.sh" <<'DECODE_EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "[decode] IP=${DECODE_IP} TP=${DECODE_TP}+DPA port=${DECODE_PORT} GPU=0-3"
+echo "[decode] IP=${DECODE_IP} TP=${DECODE_TP} port=${DECODE_PORT}"
 
 mkdir -p /workspace/logs
 
@@ -210,14 +186,14 @@ python3 -m atom.entrypoints.openai_server \
     --model "${MODEL_PATH}" \
     --host 0.0.0.0 --server-port "${DECODE_PORT}" \
     --trust-remote-code \
-    --tensor-parallel-size "${DECODE_TP}" \
+    -tp "${DECODE_TP}" \
     --enable-dp-attention \
     --gpu-memory-utilization "${MEM_FRACTION}" \
     --block-size "${BLOCK_SIZE}" \
     --max-model-len "${MAX_MODEL_LEN}" \
     --max-num-seqs "${DECODE_MAX_NUM_SEQS}" \
     --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}" \
-    --kv-transfer-config '{"kv_role":"kv_consumer","kv_connector":"mooncake","proxy_ip":"${DECODE_IP}","handshake_port":${HANDSHAKE_PORT1}}' \
+    --kv-transfer-config '{"kv_role":"kv_consumer","kv_connector":"mooncake","proxy_ip":"${DECODE_IP}","handshake_port":${HANDSHAKE_PORT}}' \
     --cudagraph-capture-sizes "[1,2,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128,132,136,140,144,148,152,156,160,164,168,172,176,180,184,188,192,196,200,204,208,212,216,220,224,228,232,236,240,244,248,252,256,260,264,268,272,276,280,284,288,292,296,300,304,308,312,316,320,324,328,332,336,340,344,348,352,356,360,364,368,372,376,380,384,388,392,396,400,404,408,412,416,420,424,428,432,436,440,444,448,452,456,460,464,468,472,476,480,484,488,492,496,500,504,508,512,516,520,524,528,532,536,540,544,548,552,556,560,564,568,572,576,580,584,588,592,596,600,604,608,612,616,620,624,628,632,636,640,644,648,652,656,660,664,668,672,676,680,684,688,692,696,700,704,708,712,716,720,724,728,732,736,740,744,748,752,756,760,764,768,772,776,780,784,788,792,796,800,804,808,812,816,820,824,828,832,836,840,844,848,852,856,860,864,868,872,876,880,884,888,892,896,900,904,908,912,916,920,924,928,932,936,940,944,948,952,956,960,964,968,972,976,980,984,988,992,996,1000,1004,1008,1012,1016,1020,1024]" \
     ${EXTRA_SERVER_ARGS} \
     2>&1 | tee /workspace/logs/decode.log
@@ -227,24 +203,27 @@ cat > "${LOG_ROOT}/scripts/router.sh" <<'ROUTER_EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "[router] prefill1=${PREFILL_IP}:${PREFILL1_PORT} prefill2=${PREFILL_IP}:${PREFILL2_PORT} decode=${DECODE_IP}:${DECODE_PORT} router=0.0.0.0:${ROUTER_PORT}"
+echo "[router] prefill-1=${PREFILL_IP_1}:${PREFILL_PORT}"
+echo "[router] prefill-2=${PREFILL_IP_2}:${PREFILL_PORT}"
+echo "[router] decode=${DECODE_IP}:${DECODE_PORT}"
+echo "[router] router=0.0.0.0:${ROUTER_PORT}"
 
-mkdir -p /workspace/logroot/router
+mkdir -p /workspace/logs
 
 /usr/local/bin/atomesh launch \
     --host 0.0.0.0 --port "${ROUTER_PORT}" \
     --pd-disaggregation \
-    --prefill "http://${PREFILL_IP}:${PREFILL1_PORT}" \
-    --prefill "http://${PREFILL_IP}:${PREFILL2_PORT}" \
+    --prefill "http://${PREFILL_IP_1}:${PREFILL_PORT}" \
+    --prefill "http://${PREFILL_IP_2}:${PREFILL_PORT}" \
     --decode  "http://${DECODE_IP}:${DECODE_PORT}" \
     --policy random \
     --backend atom \
-    --log-dir /workspace/logroot/router \
+    --log-dir /workspace/logs \
     --log-level info \
     --disable-health-check \
     --disable-circuit-breaker \
     --prometheus-port 29100 \
-    2>&1 | tee /workspace/logroot/router/router.log
+    2>&1 | tee /workspace/logs/router.log
 ROUTER_EOF
 
 cat > "${LOG_ROOT}/scripts/gsm8k.sh" <<'GSM8K_EOF'
@@ -373,8 +352,8 @@ if not json_files:
     print('No result files found')
     exit(0)
 
-print(f\"{'Config':<30} {'TTFT(ms)':>10} {'ITL(ms)':>10} {'Throughput(tok/s)':>18}\")
-print('-' * 70)
+print(f\"{'Config':<25} {'TTFT(ms)':>10} {'ITL(ms)':>10} {'Throughput(tok/s)':>18}\")
+print('-' * 65)
 for f in json_files:
     d = json.load(open(f))
     isl = d.get('random_input_len', '?')
@@ -393,16 +372,15 @@ chmod +x "${LOG_ROOT}"/scripts/*.sh
 
 for script in "${LOG_ROOT}"/scripts/*.sh; do
     sed -i \
-        -e "s|\${PREFILL_IP}|${PREFILL_IP}|g" \
+        -e "s|\${PREFILL_IP_1}|${PREFILL_IP_1}|g" \
+        -e "s|\${PREFILL_IP_2}|${PREFILL_IP_2}|g" \
         -e "s|\${DECODE_IP}|${DECODE_IP}|g" \
         -e "s|\${PREFILL_TP}|${PREFILL_TP}|g" \
         -e "s|\${DECODE_TP}|${DECODE_TP}|g" \
-        -e "s|\${PREFILL1_PORT}|${PREFILL1_PORT}|g" \
-        -e "s|\${PREFILL2_PORT}|${PREFILL2_PORT}|g" \
+        -e "s|\${PREFILL_PORT}|${PREFILL_PORT}|g" \
         -e "s|\${DECODE_PORT}|${DECODE_PORT}|g" \
         -e "s|\${ROUTER_PORT}|${ROUTER_PORT}|g" \
-        -e "s|\${HANDSHAKE_PORT1}|${HANDSHAKE_PORT1}|g" \
-        -e "s|\${HANDSHAKE_PORT2}|${HANDSHAKE_PORT2}|g" \
+        -e "s|\${HANDSHAKE_PORT}|${HANDSHAKE_PORT}|g" \
         -e "s|\${MODEL_PATH}|${MODEL_PATH}|g" \
         -e "s|\${MEM_FRACTION}|${MEM_FRACTION}|g" \
         -e "s|\${BLOCK_SIZE}|${BLOCK_SIZE}|g" \
@@ -410,8 +388,7 @@ for script in "${LOG_ROOT}"/scripts/*.sh; do
         -e "s|\${MAX_NUM_SEQS}|${MAX_NUM_SEQS}|g" \
         -e "s|\${DECODE_MAX_NUM_SEQS}|${DECODE_MAX_NUM_SEQS}|g" \
         -e "s|\${MAX_NUM_BATCHED_TOKENS}|${MAX_NUM_BATCHED_TOKENS}|g" \
-        -e "s|\${PREFILL1_GPU_IDS}|${PREFILL1_GPU_IDS}|g" \
-        -e "s|\${PREFILL2_GPU_IDS}|${PREFILL2_GPU_IDS}|g" \
+        -e "s|\${PREFILL_GPU_IDS}|${PREFILL_GPU_IDS}|g" \
         -e "s|\${DECODE_GPU_IDS}|${DECODE_GPU_IDS}|g" \
         -e "s|\${EXTRA_SERVER_ARGS}|${EXTRA_SERVER_ARGS}|g" \
         -e "s|\${ISL_LIST}|${ISL_LIST}|g" \
@@ -434,7 +411,7 @@ cleanup() {
     local rc=$?
     echo ""
     echo "=== cleanup (rc=${rc}) at $(date -Is) ==="
-    for node in "$PREFILL_NODE" "$DECODE_NODE"; do
+    for node in "${ALL_NODES[@]}"; do
         srun --nodelist="$node" --nodes=1 --ntasks=1 --time=00:01:00 bash -c "
             docker logs '${CONTAINER}' > '${LOG_ROOT}/docker_\$(hostname).log' 2>&1 || true
             docker rm -f '${CONTAINER}' >/dev/null 2>&1 || true
@@ -549,9 +526,10 @@ nic_mount_flags() {
     echo "${flags[@]}"
 }
 
-launch_container_prefill() {
+launch_container() {
     local node="$1"
-    echo "[prefill] starting container on ${node} (both prefill1+prefill2)"
+    local role="$2"
+    echo "[${role}] starting container on ${node}"
     srun --nodelist="$node" --nodes=1 --ntasks=1 bash -lc "
         set -euo pipefail
 
@@ -578,51 +556,9 @@ launch_container_prefill() {
             -v /mnt:/mnt \
             -v /data:/data \
             -v /it-share:/it-share \
-            -v '${LOG_ROOT}':/workspace/logroot \
+            -v '${LOG_ROOT}/${role}':/workspace/logs \
             -v '${LOG_ROOT}/bench':/workspace/benchmark_results \
             -v '${LOG_ROOT}/gsm8k':/workspace/gsm8k_results \
-            \"\${NIC_MOUNTS[@]}\" \
-            '${DOCKER_IMAGE}' sleep infinity
-        docker inspect -f '{{.State.Status}}' '${CONTAINER}'
-
-        docker exec '${CONTAINER}' bash -c '
-            sysctl -w net.core.somaxconn=4096 2>/dev/null || true
-            sysctl -w net.ipv4.tcp_max_syn_backlog=4096 2>/dev/null || true
-        '
-        echo \"[docker] tuned TCP backlog on \$(hostname)\"
-    "
-}
-
-launch_container_decode() {
-    local node="$1"
-    echo "[decode] starting container on ${node}"
-    srun --nodelist="$node" --nodes=1 --ntasks=1 bash -lc "
-        set -euo pipefail
-
-        $(declare -f detect_nic_type find_host_ibverbs nic_mount_flags)
-        NIC_TYPE=\$(detect_nic_type)
-        echo \"[docker] NIC type detected: \${NIC_TYPE} on \$(hostname)\"
-        read -ra NIC_MOUNTS <<< \"\$(nic_mount_flags \"\${NIC_TYPE}\")\"
-        if [[ \${#NIC_MOUNTS[@]} -gt 0 ]]; then
-            echo \"[docker] RDMA mounts: \${NIC_MOUNTS[*]}\"
-        else
-            echo \"[docker] no out-of-tree RDMA mounts needed\"
-        fi
-
-        docker rm -f '${CONTAINER}' 2>/dev/null || true
-        docker pull '${DOCKER_IMAGE}'
-        docker run -d --name '${CONTAINER}' \
-            --network host --ipc host --privileged \
-            --device /dev/kfd --device /dev/dri \
-            --device /dev/infiniband \
-            --group-add video \
-            --cap-add IPC_LOCK --cap-add NET_ADMIN \
-            --ulimit memlock=-1 --ulimit stack=67108864 --ulimit nofile=65536:524288 \
-            --shm-size 128G \
-            -v /mnt:/mnt \
-            -v /data:/data \
-            -v /it-share:/it-share \
-            -v '${LOG_ROOT}/decode':/workspace/logs \
             \"\${NIC_MOUNTS[@]}\" \
             '${DOCKER_IMAGE}' sleep infinity
         docker inspect -f '{{.State.Status}}' '${CONTAINER}'
@@ -683,51 +619,51 @@ except Exception:
 }
 
 # ======================== 1. start containers ========================
-launch_container_prefill "$PREFILL_NODE"
-launch_container_decode  "$DECODE_NODE"
+launch_container "$PREFILL_NODE_1"  prefill_1
+launch_container "$PREFILL_NODE_2"  prefill_2
+launch_container "$DECODE_NODE"     decode
 
-# ======================== 2. start prefill1 + prefill2 (detached, same node) ========================
-echo "[prefill1] launching on ${PREFILL_NODE} GPU 0-3"
-srun --nodelist="$PREFILL_NODE" --nodes=1 --ntasks=1 bash -lc "
-    docker exec -d '${CONTAINER}' bash '${LOG_ROOT}/scripts/prefill1.sh'
+# ======================== 2. start prefill servers (detached) ========================
+echo "[prefill-1] launching server on ${PREFILL_NODE_1}"
+srun --nodelist="$PREFILL_NODE_1" --nodes=1 --ntasks=1 bash -lc "
+    docker exec -d '${CONTAINER}' bash '${LOG_ROOT}/scripts/prefill_1.sh'
 "
-
-echo "[prefill2] launching on ${PREFILL_NODE} GPU 4-7"
-srun --nodelist="$PREFILL_NODE" --nodes=1 --ntasks=1 bash -lc "
-    docker exec -d '${CONTAINER}' bash '${LOG_ROOT}/scripts/prefill2.sh'
+echo "[prefill-2] launching server on ${PREFILL_NODE_2}"
+srun --nodelist="$PREFILL_NODE_2" --nodes=1 --ntasks=1 bash -lc "
+    docker exec -d '${CONTAINER}' bash '${LOG_ROOT}/scripts/prefill_2.sh'
 "
 
 # ======================== 3. start decode server (detached) ========================
-echo "[decode] launching on ${DECODE_NODE} GPU 0-3"
+echo "[decode] launching server on ${DECODE_NODE}"
 srun --nodelist="$DECODE_NODE" --nodes=1 --ntasks=1 bash -lc "
     docker exec -d '${CONTAINER}' bash '${LOG_ROOT}/scripts/decode.sh'
 "
 
-# ======================== 4. wait for all three servers ========================
-wait_endpoint "$PREFILL_NODE" "http://${PREFILL_IP}:${PREFILL1_PORT}/health" \
-    "$WAIT_SERVER_TIMEOUT" "prefill1-http"
-wait_endpoint "$PREFILL_NODE" "http://${PREFILL_IP}:${PREFILL2_PORT}/health" \
-    "$WAIT_SERVER_TIMEOUT" "prefill2-http"
-wait_endpoint "$DECODE_NODE"  "http://${DECODE_IP}:${DECODE_PORT}/health" \
+# ======================== 4. wait for servers ========================
+wait_endpoint "$PREFILL_NODE_1" "http://${PREFILL_IP_1}:${PREFILL_PORT}/health" \
+    "$WAIT_SERVER_TIMEOUT" "prefill-1-http"
+wait_endpoint "$PREFILL_NODE_2" "http://${PREFILL_IP_2}:${PREFILL_PORT}/health" \
+    "$WAIT_SERVER_TIMEOUT" "prefill-2-http"
+wait_endpoint "$DECODE_NODE"    "http://${DECODE_IP}:${DECODE_PORT}/health" \
     "$WAIT_SERVER_TIMEOUT" "decode-http"
 
-# ======================== 5. start router (detached, on prefill node) ========================
-echo "[router] launching on ${PREFILL_NODE}"
-srun --nodelist="$PREFILL_NODE" --nodes=1 --ntasks=1 bash -lc "
+# ======================== 5. start router (detached) ========================
+echo "[router] launching on ${PREFILL_NODE_1}"
+srun --nodelist="$PREFILL_NODE_1" --nodes=1 --ntasks=1 bash -lc "
     docker exec -d '${CONTAINER}' bash '${LOG_ROOT}/scripts/router.sh'
 "
 
-wait_endpoint "$PREFILL_NODE" "http://${PREFILL_IP}:${ROUTER_PORT}/v1/models" \
+wait_endpoint "$PREFILL_NODE_1" "http://${PREFILL_IP_1}:${ROUTER_PORT}/v1/models" \
     "$WAIT_ROUTER_TIMEOUT" "router-http"
 
-wait_inference_ready "$PREFILL_NODE" "http://${PREFILL_IP}:${ROUTER_PORT}" \
+wait_inference_ready "$PREFILL_NODE_1" "http://${PREFILL_IP_1}:${ROUTER_PORT}" \
     "$MODEL_PATH" "$WAIT_SERVER_TIMEOUT" "router-pipeline"
 
 # ======================== 6. run gsm8k accuracy (foreground, optional) ========================
 if [[ "${RUN_GSM8K}" == "1" ]]; then
     echo ""
-    echo "=== running GSM8K accuracy eval on ${PREFILL_NODE} ==="
-    srun --nodelist="$PREFILL_NODE" --nodes=1 --ntasks=1 bash -lc "
+    echo "=== running GSM8K accuracy eval on ${PREFILL_NODE_1} ==="
+    srun --nodelist="$PREFILL_NODE_1" --nodes=1 --ntasks=1 bash -lc "
         docker exec '${CONTAINER}' bash '${LOG_ROOT}/scripts/gsm8k.sh'
     "
 else
@@ -736,8 +672,8 @@ fi
 
 # ======================== 7. run benchmark (foreground) ========================
 echo ""
-echo "=== running benchmark on ${PREFILL_NODE} ==="
-srun --nodelist="$PREFILL_NODE" --nodes=1 --ntasks=1 bash -lc "
+echo "=== running benchmark on ${PREFILL_NODE_1} ==="
+srun --nodelist="$PREFILL_NODE_1" --nodes=1 --ntasks=1 bash -lc "
     docker exec '${CONTAINER}' bash '${LOG_ROOT}/scripts/benchmark.sh'
 "
 
