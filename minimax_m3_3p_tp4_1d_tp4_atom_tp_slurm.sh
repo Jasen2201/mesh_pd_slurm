@@ -28,7 +28,7 @@ set -euo pipefail
 
 # ======================== configuration ========================
 MODEL_PATH="${MODEL_PATH:-/mnt/models/MiniMax-M3-MXFP4}"
-DOCKER_IMAGE="${DOCKER_IMAGE:-rocm/atom-dev:M3}"
+DOCKER_IMAGE="${DOCKER_IMAGE:-rocm/atom-dev:MiniMax-M3-20260619}"
 CONTAINER="${CONTAINER:-atom_mesh_minimax_m3_3p1d_tp4_${SLURM_JOB_ID}}"
 
 PREFILL_TP="${PREFILL_TP:-4}"
@@ -142,6 +142,7 @@ mkdir -p /workspace/logroot/prefill1
 export HIP_VISIBLE_DEVICES=${PREFILL1_GPU_IDS}
 export PYTHONUNBUFFERED=1
 export HSA_NO_SCRATCH_RECLAIM=1
+export AITER_QUICK_REDUCE_QUANTIZATION=INT4
 export ATOM_HOST_IP=${PREFILL_IP}
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 
@@ -173,6 +174,7 @@ mkdir -p /workspace/logroot/prefill2
 export HIP_VISIBLE_DEVICES=${PREFILL2_GPU_IDS}
 export PYTHONUNBUFFERED=1
 export HSA_NO_SCRATCH_RECLAIM=1
+export AITER_QUICK_REDUCE_QUANTIZATION=INT4
 export ATOM_HOST_IP=${PREFILL_IP}
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 
@@ -204,6 +206,7 @@ mkdir -p /workspace/logroot/prefill3
 export HIP_VISIBLE_DEVICES=${PREFILL3_GPU_IDS}
 export PYTHONUNBUFFERED=1
 export HSA_NO_SCRATCH_RECLAIM=1
+export AITER_QUICK_REDUCE_QUANTIZATION=INT4
 export ATOM_HOST_IP=${DECODE_IP}
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 
@@ -235,6 +238,7 @@ mkdir -p /workspace/logroot/decode
 export HIP_VISIBLE_DEVICES=${DECODE_GPU_IDS}
 export PYTHONUNBUFFERED=1
 export HSA_NO_SCRATCH_RECLAIM=1
+export AITER_QUICK_REDUCE_QUANTIZATION=INT4
 export ATOM_HOST_IP=${DECODE_IP}
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 

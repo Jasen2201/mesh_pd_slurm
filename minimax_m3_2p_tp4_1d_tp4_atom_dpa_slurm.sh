@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=minimax-m3-2p-tp4-1d-tp4-atom-tp
+#SBATCH --job-name=minimax-m3-2p-tp4-1d-tp4-atom-dpa
 #SBATCH --account=amd-frameworks
 #SBATCH --partition=amd-frameworks
 #SBATCH --nodes=2
@@ -10,23 +10,24 @@
 #SBATCH --exclusive
 #SBATCH --time=04:00:00
 #SBATCH --nodelist=mia1-p02-g42,mia1-p02-g44
-#SBATCH --output=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_2p_tp4_1d_tp4_atom_tp-%j.out
-#SBATCH --error=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_2p_tp4_1d_tp4_atom_tp-%j.err
+#SBATCH --output=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_2p_tp4_1d_tp4_atom_dpa-%j.out
+#SBATCH --error=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_2p_tp4_1d_tp4_atom_dpa-%j.err
 #
-# 2P+1D PD-disaggregated benchmark for MiniMax-M3-MXFP4 on ATOM.
-#   Node1 (g42): prefill1 (GPU 0-3, port 8010) + prefill2 (GPU 4-7, port 8011) + router
-#   Node2 (g44): decode   (GPU 0-3, port 8020)
+# 2P+1D PD-disaggregated benchmark for MiniMax-M3-MXFP4 on ATOM with DPA.
+#   Node1 (g42): prefill1 (GPU 0-3, TP4+DPA) + prefill2 (GPU 4-7, TP4+DPA) + router
+#   Node2 (g44): decode   (GPU 0-3, TP4+DPA)
+#   Each instance: attention=DP4, MoE=TP4 sharding via --enable-dp-attention
 #
 # Usage:
 #   mkdir -p /it-share/yajizhan/slurm_minimax_logs
-#   sbatch minimax_m3_2p_tp4_1d_tp4_atom_tp_slurm.sh
+#   sbatch minimax_m3_2p_tp4_1d_tp4_atom_dpa_slurm.sh
 
 set -euo pipefail
 
 # ======================== configuration ========================
 MODEL_PATH="${MODEL_PATH:-/mnt/models/MiniMax-M3-MXFP4}"
 DOCKER_IMAGE="${DOCKER_IMAGE:-rocm/atom-dev:MiniMax-M3-20260619}"
-CONTAINER="${CONTAINER:-atom_mesh_minimax_m3_2p1d_tp4_${SLURM_JOB_ID}}"
+CONTAINER="${CONTAINER:-atom_mesh_minimax_m3_2p1d_tp4_dpa_${SLURM_JOB_ID}}"
 
 PREFILL_TP="${PREFILL_TP:-4}"
 DECODE_TP="${DECODE_TP:-4}"
@@ -47,7 +48,7 @@ EXTRA_SERVER_ARGS="${EXTRA_SERVER_ARGS:-}"
 
 ISL_LIST="${ISL_LIST:-8192}"
 OSL="${OSL:-1024}"
-CONC_LIST="${CONC_LIST:-64,128,256,512}"
+CONC_LIST="${CONC_LIST:-256,512,768,1024}"
 RANDOM_RANGE_RATIO="${RANDOM_RANGE_RATIO:-0.8}"
 
 WAIT_SERVER_TIMEOUT="${WAIT_SERVER_TIMEOUT:-1800}"
@@ -60,7 +61,7 @@ GSM8K_NUM_CONCURRENT="${GSM8K_NUM_CONCURRENT:-32}"
 GSM8K_BATCH_SIZE="${GSM8K_BATCH_SIZE:-65}"
 GSM8K_MAX_GEN_TOKS="${GSM8K_MAX_GEN_TOKS:-16384}"
 
-LOG_ROOT="${LOG_ROOT:-/it-share/yajizhan/slurm_minimax_logs/$(date +%m%d)_minimax_m3_2p_tp4_1d_tp4_atom_tp_${SLURM_JOB_ID}}"
+LOG_ROOT="${LOG_ROOT:-/it-share/yajizhan/slurm_minimax_logs/$(date +%m%d)_minimax_m3_2p_tp4_1d_tp4_atom_dpa_${SLURM_JOB_ID}}"
 
 # ======================== pre-flight ========================
 echo "=== Job ${SLURM_JOB_ID} starting on $(hostname) at $(date -Is) ==="
@@ -106,13 +107,13 @@ DECODE_IP=$(srun --nodelist="$DECODE_NODE" --nodes=1 --ntasks=1 \
 
 cat <<INFO
 === Configuration ===
-PREFILL1: ${PREFILL_NODE} GPU 0-3 (IP=${PREFILL_IP}, TP=${PREFILL_TP}, port=${PREFILL1_PORT}, handshake=${HANDSHAKE_PORT1})
-PREFILL2: ${PREFILL_NODE} GPU 4-7 (IP=${PREFILL_IP}, TP=${PREFILL_TP}, port=${PREFILL2_PORT}, handshake=${HANDSHAKE_PORT2})
-DECODE  : ${DECODE_NODE}  GPU 0-3 (IP=${DECODE_IP},  TP=${DECODE_TP},  port=${DECODE_PORT})
+PREFILL1: ${PREFILL_NODE} GPU 0-3 (IP=${PREFILL_IP}, TP=${PREFILL_TP}+DPA, port=${PREFILL1_PORT}, handshake=${HANDSHAKE_PORT1})
+PREFILL2: ${PREFILL_NODE} GPU 4-7 (IP=${PREFILL_IP}, TP=${PREFILL_TP}+DPA, port=${PREFILL2_PORT}, handshake=${HANDSHAKE_PORT2})
+DECODE  : ${DECODE_NODE}  GPU 0-3 (IP=${DECODE_IP},  TP=${DECODE_TP}+DPA,  port=${DECODE_PORT})
 ROUTER  : ${PREFILL_IP}:${ROUTER_PORT}
 MODEL   : ${MODEL_PATH}
 IMAGE   : ${DOCKER_IMAGE}
-BACKEND : atom (PD mooncake KV transfer, pure TP)
+BACKEND : atom (PD mooncake KV transfer, TP4+DPA)
 RUN_GSM8K  : ${RUN_GSM8K} (limit=${GSM8K_LIMIT:-all}, fewshot=${GSM8K_NUM_FEWSHOT})
 ISL/OSL/CONC : ${ISL_LIST} / ${OSL} / ${CONC_LIST}
 LOG_ROOT: ${LOG_ROOT}
@@ -128,7 +129,7 @@ cat > "${LOG_ROOT}/scripts/prefill1.sh" <<'PREFILL1_EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "[prefill1] IP=${PREFILL_IP} TP=${PREFILL_TP} port=${PREFILL1_PORT} GPU=0-3"
+echo "[prefill1] IP=${PREFILL_IP} TP=${PREFILL_TP}+DPA port=${PREFILL1_PORT} GPU=0-3"
 
 mkdir -p /workspace/logroot/prefill1
 
@@ -146,6 +147,7 @@ python3 -m atom.entrypoints.openai_server \
     --host 0.0.0.0 --server-port "${PREFILL1_PORT}" \
     --trust-remote-code \
     --tensor-parallel-size "${PREFILL_TP}" \
+    --enable-dp-attention \
     --gpu-memory-utilization "${MEM_FRACTION}" \
     --block-size "${BLOCK_SIZE}" \
     --max-model-len "${MAX_MODEL_LEN}" \
@@ -160,7 +162,7 @@ cat > "${LOG_ROOT}/scripts/prefill2.sh" <<'PREFILL2_EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "[prefill2] IP=${PREFILL_IP} TP=${PREFILL_TP} port=${PREFILL2_PORT} GPU=4-7"
+echo "[prefill2] IP=${PREFILL_IP} TP=${PREFILL_TP}+DPA port=${PREFILL2_PORT} GPU=4-7"
 
 mkdir -p /workspace/logroot/prefill2
 
@@ -171,13 +173,12 @@ export AITER_QUICK_REDUCE_QUANTIZATION=INT4
 export ATOM_HOST_IP=${PREFILL_IP}
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 
-rm -rf /root/.cache/atom/* 2>/dev/null || true
-
 python3 -m atom.entrypoints.openai_server \
     --model "${MODEL_PATH}" \
     --host 0.0.0.0 --server-port "${PREFILL2_PORT}" \
     --trust-remote-code \
     --tensor-parallel-size "${PREFILL_TP}" \
+    --enable-dp-attention \
     --gpu-memory-utilization "${MEM_FRACTION}" \
     --block-size "${BLOCK_SIZE}" \
     --max-model-len "${MAX_MODEL_LEN}" \
@@ -192,7 +193,7 @@ cat > "${LOG_ROOT}/scripts/decode.sh" <<'DECODE_EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "[decode] IP=${DECODE_IP} TP=${DECODE_TP} port=${DECODE_PORT} GPU=0-3"
+echo "[decode] IP=${DECODE_IP} TP=${DECODE_TP}+DPA port=${DECODE_PORT} GPU=0-3"
 
 mkdir -p /workspace/logs
 
@@ -210,13 +211,14 @@ python3 -m atom.entrypoints.openai_server \
     --host 0.0.0.0 --server-port "${DECODE_PORT}" \
     --trust-remote-code \
     --tensor-parallel-size "${DECODE_TP}" \
+    --enable-dp-attention \
     --gpu-memory-utilization "${MEM_FRACTION}" \
     --block-size "${BLOCK_SIZE}" \
     --max-model-len "${MAX_MODEL_LEN}" \
     --max-num-seqs "${DECODE_MAX_NUM_SEQS}" \
     --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}" \
     --kv-transfer-config '{"kv_role":"kv_consumer","kv_connector":"mooncake","proxy_ip":"${DECODE_IP}","handshake_port":${HANDSHAKE_PORT1}}' \
-    --cudagraph-capture-sizes "[1,2,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128,132,136,140,144,148,152,156,160,164,168,172,176,180,184,188,192,196,200,204,208,212,216,220,224,228,232,236,240,244,248,252,256,260,264,268,272,276,280,284,288,292,296,300,304,308,312,316,320,324,328,332,336,340,344,348,352,356,360,364,368,372,376,380,384,388,392,396,400,404,408,412,416,420,424,428,432,436,440,444,448,452,456,460,464,468,472,476,480,484,488,492,496,500,504,508,512]" \
+    --cudagraph-capture-sizes "[1,2,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128,132,136,140,144,148,152,156,160,164,168,172,176,180,184,188,192,196,200,204,208,212,216,220,224,228,232,236,240,244,248,252,256,260,264,268,272,276,280,284,288,292,296,300,304,308,312,316,320,324,328,332,336,340,344,348,352,356,360,364,368,372,376,380,384,388,392,396,400,404,408,412,416,420,424,428,432,436,440,444,448,452,456,460,464,468,472,476,480,484,488,492,496,500,504,508,512,516,520,524,528,532,536,540,544,548,552,556,560,564,568,572,576,580,584,588,592,596,600,604,608,612,616,620,624,628,632,636,640,644,648,652,656,660,664,668,672,676,680,684,688,692,696,700,704,708,712,716,720,724,728,732,736,740,744,748,752,756,760,764,768,772,776,780,784,788,792,796,800,804,808,812,816,820,824,828,832,836,840,844,848,852,856,860,864,868,872,876,880,884,888,892,896,900,904,908,912,916,920,924,928,932,936,940,944,948,952,956,960,964,968,972,976,980,984,988,992,996,1000,1004,1008,1012,1016,1020,1024]" \
     ${EXTRA_SERVER_ARGS} \
     2>&1 | tee /workspace/logs/decode.log
 DECODE_EOF
@@ -268,7 +270,7 @@ fi
 
 IFS=',' read -ra GSM8K_CONCS <<< "${GSM8K_NUM_CONCURRENT}"
 for GSM8K_CONC in "${GSM8K_CONCS[@]}"; do
-    RUN_TAG="$(date +%Y%m%d%H%M%S)_gsm8k_minimax_m3_2p1d_tp4_c${GSM8K_CONC}"
+    RUN_TAG="$(date +%Y%m%d%H%M%S)_gsm8k_minimax_m3_2p1d_tp4_dpa_c${GSM8K_CONC}"
     echo ""
     echo "========================================="
     echo "[gsm8k] running with concurrent=${GSM8K_CONC}"
@@ -329,7 +331,7 @@ IFS=',' read -ra CONCS <<< "${CONC_LIST}"
 
 for ISL in "${ISLS[@]}"; do
     for CONC in "${CONCS[@]}"; do
-        RESULT_FILENAME="pd-atom-minimax-m3-2p1d-tp4-${ISL}-${OSL}-${CONC}-${RANDOM_RANGE_RATIO}"
+        RESULT_FILENAME="pd-atom-minimax-m3-2p1d-tp4-dpa-${ISL}-${OSL}-${CONC}-${RANDOM_RANGE_RATIO}"
         echo ""
         echo "========================================="
         echo "[bench] ISL=${ISL} OSL=${OSL} CONC=${CONC}"
@@ -366,13 +368,13 @@ from pathlib import Path
 import json
 
 result_dir = Path('${RESULT_DIR}')
-json_files = sorted(result_dir.glob('pd-atom-minimax-m3-2p1d-tp4-*.json'))
+json_files = sorted(result_dir.glob('pd-atom-minimax-m3-2p1d-tp4-dpa-*.json'))
 if not json_files:
     print('No result files found')
     exit(0)
 
-print(f\"{'Config':<25} {'TTFT(ms)':>10} {'ITL(ms)':>10} {'Throughput(tok/s)':>18}\")
-print('-' * 65)
+print(f\"{'Config':<30} {'TTFT(ms)':>10} {'ITL(ms)':>10} {'Throughput(tok/s)':>18}\")
+print('-' * 70)
 for f in json_files:
     d = json.load(open(f))
     isl = d.get('random_input_len', '?')

@@ -9,7 +9,7 @@
 #SBATCH --gres=gpu:8
 #SBATCH --exclusive
 #SBATCH --time=04:00:00
-#SBATCH --nodelist=mia1-p02-g47
+#SBATCH --nodelist=mia1-p02-g09
 #SBATCH --output=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_1node_1p1d_tp4-%j.out
 #SBATCH --error=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_1node_1p1d_tp4-%j.err
 #
@@ -27,7 +27,7 @@ set -euo pipefail
 
 # ======================== configuration ========================
 MODEL_PATH="${MODEL_PATH:-/mnt/models/MiniMax-M3-MXFP4}"
-DOCKER_IMAGE="${DOCKER_IMAGE:-rocm/atom-dev:M3-20260619}"
+DOCKER_IMAGE="${DOCKER_IMAGE:-rocm/atom-dev:MiniMax-M3-20260619}"
 CONTAINER="${CONTAINER:-atom_mesh_minimax_m3_1node_1p1d_tp4_${SLURM_JOB_ID}}"
 
 PREFILL_TP="${PREFILL_TP:-4}"

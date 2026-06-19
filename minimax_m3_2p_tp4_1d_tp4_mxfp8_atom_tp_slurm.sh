@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=minimax-m3-2p-tp4-1d-tp4-atom-tp
+#SBATCH --job-name=minimax-m3-mxfp8-2p-tp4-1d-tp4-atom-tp
 #SBATCH --account=amd-frameworks
 #SBATCH --partition=amd-frameworks
 #SBATCH --nodes=2
@@ -10,23 +10,23 @@
 #SBATCH --exclusive
 #SBATCH --time=04:00:00
 #SBATCH --nodelist=mia1-p02-g42,mia1-p02-g44
-#SBATCH --output=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_2p_tp4_1d_tp4_atom_tp-%j.out
-#SBATCH --error=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_2p_tp4_1d_tp4_atom_tp-%j.err
+#SBATCH --output=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_mxfp8_2p_tp4_1d_tp4_atom_tp-%j.out
+#SBATCH --error=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_mxfp8_2p_tp4_1d_tp4_atom_tp-%j.err
 #
-# 2P+1D PD-disaggregated benchmark for MiniMax-M3-MXFP4 on ATOM.
+# 2P+1D PD-disaggregated benchmark for MiniMax-M3-MXFP8 on ATOM.
 #   Node1 (g42): prefill1 (GPU 0-3, port 8010) + prefill2 (GPU 4-7, port 8011) + router
 #   Node2 (g44): decode   (GPU 0-3, port 8020)
 #
 # Usage:
 #   mkdir -p /it-share/yajizhan/slurm_minimax_logs
-#   sbatch minimax_m3_2p_tp4_1d_tp4_atom_tp_slurm.sh
+#   sbatch minimax_m3_2p_tp4_1d_tp4_mxfp8_atom_tp_slurm.sh
 
 set -euo pipefail
 
 # ======================== configuration ========================
-MODEL_PATH="${MODEL_PATH:-/mnt/models/MiniMax-M3-MXFP4}"
+MODEL_PATH="${MODEL_PATH:-/mnt/models/MiniMax-M3-MXFP8}"
 DOCKER_IMAGE="${DOCKER_IMAGE:-rocm/atom-dev:MiniMax-M3-20260619}"
-CONTAINER="${CONTAINER:-atom_mesh_minimax_m3_2p1d_tp4_${SLURM_JOB_ID}}"
+CONTAINER="${CONTAINER:-atom_mesh_minimax_m3_mxfp8_2p1d_tp4_${SLURM_JOB_ID}}"
 
 PREFILL_TP="${PREFILL_TP:-4}"
 DECODE_TP="${DECODE_TP:-4}"
@@ -60,7 +60,7 @@ GSM8K_NUM_CONCURRENT="${GSM8K_NUM_CONCURRENT:-32}"
 GSM8K_BATCH_SIZE="${GSM8K_BATCH_SIZE:-65}"
 GSM8K_MAX_GEN_TOKS="${GSM8K_MAX_GEN_TOKS:-16384}"
 
-LOG_ROOT="${LOG_ROOT:-/it-share/yajizhan/slurm_minimax_logs/$(date +%m%d)_minimax_m3_2p_tp4_1d_tp4_atom_tp_${SLURM_JOB_ID}}"
+LOG_ROOT="${LOG_ROOT:-/it-share/yajizhan/slurm_minimax_logs/$(date +%m%d)_minimax_m3_mxfp8_2p_tp4_1d_tp4_atom_tp_${SLURM_JOB_ID}}"
 
 # ======================== pre-flight ========================
 echo "=== Job ${SLURM_JOB_ID} starting on $(hostname) at $(date -Is) ==="
@@ -268,7 +268,7 @@ fi
 
 IFS=',' read -ra GSM8K_CONCS <<< "${GSM8K_NUM_CONCURRENT}"
 for GSM8K_CONC in "${GSM8K_CONCS[@]}"; do
-    RUN_TAG="$(date +%Y%m%d%H%M%S)_gsm8k_minimax_m3_2p1d_tp4_c${GSM8K_CONC}"
+    RUN_TAG="$(date +%Y%m%d%H%M%S)_gsm8k_minimax_m3_mxfp8_2p1d_tp4_c${GSM8K_CONC}"
     echo ""
     echo "========================================="
     echo "[gsm8k] running with concurrent=${GSM8K_CONC}"
@@ -329,7 +329,7 @@ IFS=',' read -ra CONCS <<< "${CONC_LIST}"
 
 for ISL in "${ISLS[@]}"; do
     for CONC in "${CONCS[@]}"; do
-        RESULT_FILENAME="pd-atom-minimax-m3-2p1d-tp4-${ISL}-${OSL}-${CONC}-${RANDOM_RANGE_RATIO}"
+        RESULT_FILENAME="pd-atom-minimax-m3-mxfp8-2p1d-tp4-${ISL}-${OSL}-${CONC}-${RANDOM_RANGE_RATIO}"
         echo ""
         echo "========================================="
         echo "[bench] ISL=${ISL} OSL=${OSL} CONC=${CONC}"
@@ -366,7 +366,7 @@ from pathlib import Path
 import json
 
 result_dir = Path('${RESULT_DIR}')
-json_files = sorted(result_dir.glob('pd-atom-minimax-m3-2p1d-tp4-*.json'))
+json_files = sorted(result_dir.glob('pd-atom-minimax-m3-mxfp8-2p1d-tp4-*.json'))
 if not json_files:
     print('No result files found')
     exit(0)

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=minimax-m3-mxfp4-tp4
+#SBATCH --job-name=minimax-m3-1node-tp4-atom-dpa
 #SBATCH --account=amd-frameworks
 #SBATCH --partition=amd-frameworks
 #SBATCH --nodes=1
@@ -9,130 +9,127 @@
 #SBATCH --gres=gpu:8
 #SBATCH --exclusive
 #SBATCH --time=04:00:00
-#SBATCH --output=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_tp4-%j.out
-#SBATCH --error=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_tp4-%j.err
+#SBATCH --nodelist=mia1-p02-g44
+#SBATCH --output=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_1node_tp4dp4_atom_dpa-%j.out
+#SBATCH --error=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_1node_tp4dp4_atom_dpa-%j.err
 #
-# Single-node benchmark for MiniMax-M3-MXFP4 on ATOM.
-#   TP=4, no PD disaggregation.
+# Single-node accuracy check for MiniMax-M3-MXFP4 on ATOM with TP=4, DP=4, DPA enabled.
+#   No PD disaggregation — plain TP4+DP4 server + GSM8K eval.
+#   Use this to compare precision vs. the TP8 nodpa baseline on a different node.
 #
 # Usage:
 #   mkdir -p /it-share/yajizhan/slurm_minimax_logs
-#   sbatch minimax_m3_tp4_atom_slurm.sh
+#   sbatch minimax_m3_1node_tp4dp4_atom_dpa_slurm.sh
 
 set -euo pipefail
 
 # ======================== configuration ========================
-MODEL_PATH="${MODEL_PATH:-amd/MiniMax-M3-MXFP4}"
+MODEL_PATH="${MODEL_PATH:-/mnt/models/MiniMax-M3-MXFP4}"
 DOCKER_IMAGE="${DOCKER_IMAGE:-rocm/atom-dev:MiniMax-M3-20260619}"
-CONTAINER="${CONTAINER:-atom_mesh_minimax_m3_tp4_${SLURM_JOB_ID}}"
+CONTAINER="${CONTAINER:-atom_minimax_m3_1node_tp4dp4_${SLURM_JOB_ID}}"
 
-TP="${TP:-4}"
+SERVER_TP="${SERVER_TP:-4}"
+SERVER_DP="${SERVER_DP:-1}"
 SERVER_PORT="${SERVER_PORT:-8000}"
 
 MEM_FRACTION="${MEM_FRACTION:-0.8}"
 BLOCK_SIZE="${BLOCK_SIZE:-128}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
-MAX_NUM_SEQS="${MAX_NUM_SEQS:-128}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-256}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-32768}"
 EXTRA_SERVER_ARGS="${EXTRA_SERVER_ARGS:-}"
-
-ISL_LIST="${ISL_LIST:-8192}"
-OSL="${OSL:-1024}"
-CONC_LIST="${CONC_LIST:-1,2,4,8,16,32,64,128,256}"
-RANDOM_RANGE_RATIO="${RANDOM_RANGE_RATIO:-0.8}"
+ENABLE_DPA="${ENABLE_DPA:-1}"
+ENABLE_EP="${ENABLE_EP:-0}"
 
 WAIT_SERVER_TIMEOUT="${WAIT_SERVER_TIMEOUT:-1800}"
 
 RUN_GSM8K="${RUN_GSM8K:-1}"
 GSM8K_LIMIT="${GSM8K_LIMIT:-}"
-GSM8K_NUM_FEWSHOT="${GSM8K_NUM_FEWSHOT:-3}"
-GSM8K_NUM_CONCURRENT="${GSM8K_NUM_CONCURRENT:-64}"
+GSM8K_NUM_FEWSHOT="${GSM8K_NUM_FEWSHOT:-5}"
+GSM8K_NUM_CONCURRENT="${GSM8K_NUM_CONCURRENT:-32}"
+GSM8K_BATCH_SIZE="${GSM8K_BATCH_SIZE:-65}"
+GSM8K_MAX_GEN_TOKS="${GSM8K_MAX_GEN_TOKS:-16384}"
 
-LOG_ROOT="${LOG_ROOT:-/it-share/yajizhan/slurm_minimax_logs/$(date +%m%d)_minimax_m3_tp4_${SLURM_JOB_ID}}"
+ISL_LIST="${ISL_LIST:-8192}"
+OSL="${OSL:-1024}"
+CONC_LIST="${CONC_LIST:-64,128,256}"
+RANDOM_RANGE_RATIO="${RANDOM_RANGE_RATIO:-0.8}"
+
+RUN_BENCH="${RUN_BENCH:-0}"
+
+LOG_ROOT="${LOG_ROOT:-/it-share/yajizhan/slurm_minimax_logs/$(date +%m%d)_minimax_m3_1node_tp4dp4_atom_dpa_${SLURM_JOB_ID}}"
 
 # ======================== pre-flight ========================
 echo "=== Job ${SLURM_JOB_ID} starting on $(hostname) at $(date -Is) ==="
-mapfile -t NODES < <(scontrol show hostnames "$SLURM_JOB_NODELIST")
-if [[ "${#NODES[@]}" -ne 1 ]]; then
-    echo "ERROR: expected 1 node, got ${#NODES[@]}: ${NODES[*]}" >&2
-    exit 1
-fi
-SERVER_NODE="${NODES[0]}"
+NODE=$(hostname)
+NODE_IP=$(ip route get 1.1.1.1 | awk '/src/ {print $7; exit}')
 
 mkdir -p "${LOG_ROOT}"/{server,bench,gsm8k,scripts}
 
-# ======================== pre-cleanup ========================
-echo "=== pre-cleanup: force-stopping all docker containers on ${SERVER_NODE} ==="
-srun --nodelist="$SERVER_NODE" --nodes=1 --ntasks=1 --time=00:03:00 bash -c '
-    hostname
-    running=$(docker ps -q)
-    if [[ -n "$running" ]]; then
-        echo "  stopping $(echo "$running" | wc -l) running containers:"
-        docker ps --format "    {{.ID}} {{.Names}}"
-        docker stop -t 0 $running 2>&1 | sed "s/^/    /"
-    else
-        echo "  no running containers"
-    fi
-    sleep 2
-    used=$(rocm-smi --showmemuse 2>/dev/null | grep "VRAM%" | grep -v ": 0$" | head -5)
-    if [[ -n "$used" ]]; then
-        echo "  WARNING: some GPUs still have VRAM allocated:"
-        echo "$used" | sed "s/^/    /"
-    else
-        echo "  all GPUs free"
-    fi
-' || echo "[pre-cleanup] WARNING: cleanup on $SERVER_NODE had errors (non-fatal)"
-echo "=== pre-cleanup done ==="
-
-SERVER_IP=$(srun --nodelist="$SERVER_NODE" --nodes=1 --ntasks=1 \
-    bash -c "ip route get 1.1.1.1 | awk '/src/ {print \$7; exit}'")
-
 cat <<INFO
 === Configuration ===
-SERVER : ${SERVER_NODE} (IP=${SERVER_IP}, TP=${TP}, port=${SERVER_PORT})
-MODEL  : ${MODEL_PATH}
-IMAGE  : ${DOCKER_IMAGE}
-BACKEND: atom (single-node, pure TP)
-RUN_GSM8K  : ${RUN_GSM8K} (limit=${GSM8K_LIMIT:-all}, fewshot=${GSM8K_NUM_FEWSHOT})
-ISL/OSL/CONC : ${ISL_LIST} / ${OSL} / ${CONC_LIST}
-LOG_ROOT: ${LOG_ROOT}
+NODE      : ${NODE}  (IP=${NODE_IP})
+SERVER    : TP=${SERVER_TP}, DP=${SERVER_DP}, DPA=${ENABLE_DPA}, EP=${ENABLE_EP}, port=${SERVER_PORT}
+MODEL     : ${MODEL_PATH}
+IMAGE     : ${DOCKER_IMAGE}
+BACKEND   : atom (no PD)
+RUN_GSM8K : ${RUN_GSM8K} (limit=${GSM8K_LIMIT:-all}, fewshot=${GSM8K_NUM_FEWSHOT})
+RUN_BENCH : ${RUN_BENCH}
+LOG_ROOT  : ${LOG_ROOT}
 =====================
 INFO
 
-# ======================== generate in-container scripts ========================
-GPU_IDS=$(seq -s, 0 $((TP - 1)))
+# ======================== pre-cleanup ========================
+echo "=== pre-cleanup: stopping existing containers ==="
+running=$(docker ps -q)
+if [[ -n "$running" ]]; then
+    echo "  stopping $(echo "$running" | wc -l) running containers"
+    docker stop -t 0 $running 2>&1 | sed "s/^/    /" || true
+fi
+sleep 2
+echo "=== pre-cleanup done ==="
 
-cat > "${LOG_ROOT}/scripts/server.sh" <<'SERVER_EOF'
+# ======================== generate in-container scripts ========================
+GPU_IDS=$(seq -s, 0 $((SERVER_TP - 1)))
+
+cat > "${LOG_ROOT}/scripts/server.sh" <<SERV_EOF
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "[server] IP=${SERVER_IP} TP=${TP} port=${SERVER_PORT}"
+echo "[server] IP=${NODE_IP} TP=${SERVER_TP} DP=${SERVER_DP} EP=${ENABLE_EP} DPA=${ENABLE_DPA} port=${SERVER_PORT}"
 
 mkdir -p /workspace/logs
 
 export HIP_VISIBLE_DEVICES=${GPU_IDS}
 export PYTHONUNBUFFERED=1
-export AITER_LOG_LEVEL=WARNING
 export HSA_NO_SCRATCH_RECLAIM=1
 export AITER_QUICK_REDUCE_QUANTIZATION=INT4
-export ATOM_HOST_IP=${SERVER_IP}
-export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
+export ATOM_HOST_IP=${NODE_IP}
+export LD_LIBRARY_PATH=\$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:\${LD_LIBRARY_PATH:-}
 
 rm -rf /root/.cache/atom/* 2>/dev/null || true
 
-python3 -m atom.entrypoints.openai_server \
-    --model "${MODEL_PATH}" \
-    --host 0.0.0.0 --server-port "${SERVER_PORT}" \
-    --trust-remote-code \
-    --tensor-parallel-size "${TP}" \
-    --gpu-memory-utilization "${MEM_FRACTION}" \
-    --block-size "${BLOCK_SIZE}" \
-    --max-model-len "${MAX_MODEL_LEN}" \
-    --max-num-seqs "${MAX_NUM_SEQS}" \
-    --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}" \
-    ${EXTRA_SERVER_ARGS} \
+DPA_FLAG=""
+[[ "${ENABLE_DPA}" == "1" ]] && DPA_FLAG="--enable-dp-attention"
+EP_FLAG=""
+[[ "${ENABLE_EP}" == "1" ]] && EP_FLAG="--enable-expert-parallel"
+
+python3 -m atom.entrypoints.openai_server \\
+    --model "${MODEL_PATH}" \\
+    --host 0.0.0.0 --server-port "${SERVER_PORT}" \\
+    --trust-remote-code \\
+    -tp "${SERVER_TP}" \\
+    -dp "${SERVER_DP}" \\
+    \${DPA_FLAG} \\
+    \${EP_FLAG} \\
+    --gpu-memory-utilization "${MEM_FRACTION}" \\
+    --block-size "${BLOCK_SIZE}" \\
+    --max-model-len "${MAX_MODEL_LEN}" \\
+    --max-num-seqs "${MAX_NUM_SEQS}" \\
+    --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}" \\
+    ${EXTRA_SERVER_ARGS} \\
     2>&1 | tee /workspace/logs/server.log
-SERVER_EOF
+SERV_EOF
 
 cat > "${LOG_ROOT}/scripts/gsm8k.sh" <<'GSM8K_EOF'
 #!/usr/bin/env bash
@@ -141,7 +138,7 @@ set -euo pipefail
 RESULT_DIR="/workspace/gsm8k_results"
 
 echo "[gsm8k] model=${MODEL_PATH} endpoint=http://127.0.0.1:${SERVER_PORT}"
-echo "[gsm8k] limit=${GSM8K_LIMIT:-all} fewshot=${GSM8K_NUM_FEWSHOT} concurrent=${GSM8K_NUM_CONCURRENT}"
+echo "[gsm8k] limit=${GSM8K_LIMIT:-all} fewshot=${GSM8K_NUM_FEWSHOT} concurrent=${GSM8K_NUM_CONCURRENT} batch_size=${GSM8K_BATCH_SIZE} max_gen_toks=${GSM8K_MAX_GEN_TOKS}"
 
 if ! command -v lm_eval >/dev/null 2>&1; then
     echo "[gsm8k] installing lm-eval..."
@@ -157,16 +154,19 @@ fi
 
 IFS=',' read -ra GSM8K_CONCS <<< "${GSM8K_NUM_CONCURRENT}"
 for GSM8K_CONC in "${GSM8K_CONCS[@]}"; do
-    RUN_TAG="$(date +%Y%m%d%H%M%S)_gsm8k_minimax_m3_tp4_c${GSM8K_CONC}"
+    RUN_TAG="$(date +%Y%m%d%H%M%S)_gsm8k_minimax_m3_1node_tp4dp4_c${GSM8K_CONC}"
     echo ""
     echo "========================================="
     echo "[gsm8k] running with concurrent=${GSM8K_CONC}"
     echo "========================================="
 
-    lm_eval --model local-completions \
-        --model_args "model=${MODEL_PATH},base_url=http://127.0.0.1:${SERVER_PORT}/v1/completions,num_concurrent=${GSM8K_CONC},max_retries=3,tokenized_requests=False,trust_remote_code=True" \
+    lm_eval --model local-chat-completions \
+        --model_args "model=${MODEL_PATH},base_url=http://127.0.0.1:${SERVER_PORT}/v1/chat/completions,num_concurrent=${GSM8K_CONC},max_retries=3,max_gen_toks=${GSM8K_MAX_GEN_TOKS}" \
         --tasks gsm8k \
         --num_fewshot "${GSM8K_NUM_FEWSHOT}" \
+        --batch_size "${GSM8K_BATCH_SIZE}" \
+        --apply_chat_template \
+        --fewshot_as_multiturn \
         ${LIMIT_ARG} \
         --output_path "${RESULT_DIR}/${RUN_TAG}"
 
@@ -215,7 +215,7 @@ IFS=',' read -ra CONCS <<< "${CONC_LIST}"
 
 for ISL in "${ISLS[@]}"; do
     for CONC in "${CONCS[@]}"; do
-        RESULT_FILENAME="minimax-m3-mxfp4-tp4-${ISL}-${OSL}-${CONC}-${RANDOM_RANGE_RATIO}"
+        RESULT_FILENAME="atom-minimax-m3-1node-tp4dp4-${ISL}-${OSL}-${CONC}-${RANDOM_RANGE_RATIO}"
         echo ""
         echo "========================================="
         echo "[bench] ISL=${ISL} OSL=${OSL} CONC=${CONC}"
@@ -252,7 +252,7 @@ from pathlib import Path
 import json
 
 result_dir = Path('${RESULT_DIR}')
-json_files = sorted(result_dir.glob('minimax-m3-mxfp4-tp4-*.json'))
+json_files = sorted(result_dir.glob('atom-minimax-m3-1node-tp4dp4-*.json'))
 if not json_files:
     print('No result files found')
     exit(0)
@@ -273,12 +273,14 @@ for f in json_files:
 echo "[bench] results saved to ${RESULT_DIR}"
 BENCH_EOF
 
-chmod +x "${LOG_ROOT}"/scripts/*.sh
-
+# substitute variables in the generated scripts
 for script in "${LOG_ROOT}"/scripts/*.sh; do
     sed -i \
-        -e "s|\${SERVER_IP}|${SERVER_IP}|g" \
-        -e "s|\${TP}|${TP}|g" \
+        -e "s|\${NODE_IP}|${NODE_IP}|g" \
+        -e "s|\${SERVER_TP}|${SERVER_TP}|g" \
+        -e "s|\${SERVER_DP}|${SERVER_DP}|g" \
+        -e "s|\${ENABLE_DPA}|${ENABLE_DPA}|g" \
+        -e "s|\${ENABLE_EP}|${ENABLE_EP}|g" \
         -e "s|\${SERVER_PORT}|${SERVER_PORT}|g" \
         -e "s|\${MODEL_PATH}|${MODEL_PATH}|g" \
         -e "s|\${MEM_FRACTION}|${MEM_FRACTION}|g" \
@@ -295,8 +297,12 @@ for script in "${LOG_ROOT}"/scripts/*.sh; do
         -e "s|\${GSM8K_LIMIT}|${GSM8K_LIMIT}|g" \
         -e "s|\${GSM8K_NUM_FEWSHOT}|${GSM8K_NUM_FEWSHOT}|g" \
         -e "s|\${GSM8K_NUM_CONCURRENT}|${GSM8K_NUM_CONCURRENT}|g" \
+        -e "s|\${GSM8K_BATCH_SIZE}|${GSM8K_BATCH_SIZE}|g" \
+        -e "s|\${GSM8K_MAX_GEN_TOKS}|${GSM8K_MAX_GEN_TOKS}|g" \
         "$script"
 done
+
+chmod +x "${LOG_ROOT}"/scripts/*.sh
 
 echo "[scripts] generated under ${LOG_ROOT}/scripts/"
 ls -la "${LOG_ROOT}"/scripts/
@@ -306,12 +312,9 @@ cleanup() {
     local rc=$?
     echo ""
     echo "=== cleanup (rc=${rc}) at $(date -Is) ==="
-    srun --nodelist="$SERVER_NODE" --nodes=1 --ntasks=1 --time=00:01:00 bash -c "
-        docker logs '${CONTAINER}' > '${LOG_ROOT}/docker_\$(hostname).log' 2>&1 || true
-        docker rm -f '${CONTAINER}' >/dev/null 2>&1 || true
-        pkill -9 -f 'atom.entrypoints.openai_server' 2>/dev/null || true
-    " &
-    wait
+    docker logs "${CONTAINER}" > "${LOG_ROOT}/docker_$(hostname).log" 2>&1 || true
+    docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
+    pkill -9 -f 'atom.entrypoints.openai_server' 2>/dev/null || true
     echo "=== cleanup done; logs under ${LOG_ROOT} ==="
 }
 trap cleanup EXIT
@@ -319,7 +322,6 @@ trap 'echo "=== received signal, cleaning up ==="; exit 130' INT TERM
 
 # ======================== helper ========================
 
-# ── NIC detection (from ROCm/mori ci_run.sh) ─────────────────────────────────
 detect_nic_type() {
     if [[ -n "${MORI_NIC_TYPE:-}" ]]; then
         echo "$MORI_NIC_TYPE"
@@ -383,18 +385,12 @@ nic_mount_flags() {
                 flags+=(-v "$host_ibverbs:/lib/x86_64-linux-gnu/libibverbs.so.1")
             fi
             for lib in /usr/local/lib/libbnxt_re-rdmav*.so; do
-                if [[ -f "$lib" ]]; then
-                    flags+=(-v "$lib:/usr/lib/x86_64-linux-gnu/libibverbs/$(basename "$lib")")
-                fi
+                [[ -f "$lib" ]] && flags+=(-v "$lib:/usr/lib/x86_64-linux-gnu/libibverbs/$(basename "$lib")")
             done
             for lib in /usr/local/lib/libbnxt_re.so; do
-                if [[ -f "$lib" ]]; then
-                    flags+=(-v "$lib:/usr/lib/x86_64-linux-gnu/$(basename "$lib")")
-                fi
+                [[ -f "$lib" ]] && flags+=(-v "$lib:/usr/lib/x86_64-linux-gnu/$(basename "$lib")")
             done
-            if [[ -d /etc/libibverbs.d ]]; then
-                flags+=(-v /etc/libibverbs.d:/etc/libibverbs.d:ro)
-            fi
+            [[ -d /etc/libibverbs.d ]] && flags+=(-v /etc/libibverbs.d:/etc/libibverbs.d:ro)
             ;;
         ionic)
             local host_ibverbs
@@ -406,11 +402,8 @@ nic_mount_flags() {
             for dir in "${ionic_dirs[@]}"; do
                 for lib in "$dir"/libionic*.so; do
                     if [[ -f "$lib" ]]; then
-                        local real
-                        real=$(readlink -f "$lib")
-                        if [[ -f "$real" ]]; then
-                            flags+=(-v "$real:$real")
-                        fi
+                        local real; real=$(readlink -f "$lib")
+                        [[ -f "$real" ]] && flags+=(-v "$real:$real")
                         flags+=(-v "$lib:/usr/lib/x86_64-linux-gnu/$(basename "$lib")")
                     fi
                 done
@@ -418,145 +411,113 @@ nic_mount_flags() {
             local provider_dir=/usr/lib/x86_64-linux-gnu/libibverbs
             if [[ -d "$provider_dir" ]]; then
                 for lib in "$provider_dir"/libionic-rdmav*.so; do
-                    if [[ -f "$lib" ]]; then
-                        flags+=(-v "$lib:$lib")
-                    fi
+                    [[ -f "$lib" ]] && flags+=(-v "$lib:$lib")
                 done
             fi
-            if [[ -d /etc/libibverbs.d ]]; then
-                flags+=(-v /etc/libibverbs.d:/etc/libibverbs.d:ro)
-            fi
+            [[ -d /etc/libibverbs.d ]] && flags+=(-v /etc/libibverbs.d:/etc/libibverbs.d:ro)
             ;;
-        mlx5)
-            ;;
+        mlx5) ;;
     esac
     echo "${flags[@]}"
 }
 
-launch_container() {
-    local node="$1"
-    echo "[server] starting container on ${node}"
-    srun --nodelist="$node" --nodes=1 --ntasks=1 bash -lc "
-        set -euo pipefail
-
-        $(declare -f detect_nic_type find_host_ibverbs nic_mount_flags)
-        NIC_TYPE=\$(detect_nic_type)
-        echo \"[docker] NIC type detected: \${NIC_TYPE} on \$(hostname)\"
-        read -ra NIC_MOUNTS <<< \"\$(nic_mount_flags \"\${NIC_TYPE}\")\"
-        if [[ \${#NIC_MOUNTS[@]} -gt 0 ]]; then
-            echo \"[docker] RDMA mounts: \${NIC_MOUNTS[*]}\"
-        else
-            echo \"[docker] no out-of-tree RDMA mounts needed\"
-        fi
-
-        docker rm -f '${CONTAINER}' 2>/dev/null || true
-        docker pull '${DOCKER_IMAGE}'
-        docker run -d --name '${CONTAINER}' \
-            --network host --ipc host --privileged \
-            --device /dev/kfd --device /dev/dri \
-            --device /dev/infiniband \
-            --group-add video \
-            --cap-add IPC_LOCK --cap-add NET_ADMIN \
-            --ulimit memlock=-1 --ulimit stack=67108864 --ulimit nofile=65536:524288 \
-            --shm-size 128G \
-            -v /mnt:/mnt \
-            -v /data:/data \
-            -v /it-share:/it-share \
-            -v '${LOG_ROOT}/server':/workspace/logs \
-            -v '${LOG_ROOT}/bench':/workspace/benchmark_results \
-            -v '${LOG_ROOT}/gsm8k':/workspace/gsm8k_results \
-            \"\${NIC_MOUNTS[@]}\" \
-            '${DOCKER_IMAGE}' sleep infinity
-        docker inspect -f '{{.State.Status}}' '${CONTAINER}'
-
-        docker exec '${CONTAINER}' bash -c '
-            sysctl -w net.core.somaxconn=4096 2>/dev/null || true
-            sysctl -w net.ipv4.tcp_max_syn_backlog=4096 2>/dev/null || true
-        '
-        echo \"[docker] tuned TCP backlog on \$(hostname)\"
-    "
-}
-
-wait_endpoint() {
-    local node="$1" url="$2" timeout="$3" name="$4"
-    echo "[wait] ${name} -> ${url} (timeout ${timeout}s)"
-    srun --nodelist="$node" --nodes=1 --ntasks=1 bash -lc "
-        deadline=\$(( \$(date +%s) + ${timeout} ))
-        while ! curl -sf '${url}' >/dev/null 2>&1; do
-            if [[ \$(date +%s) -ge \$deadline ]]; then
-                echo '[wait][FAIL] ${name} not ready after ${timeout}s'
-                exit 1
-            fi
-            sleep 10
-        done
-        echo '[wait][OK] ${name} ready'
-    "
-}
-
-wait_inference_ready() {
-    local node="$1" base_url="$2" model="$3" timeout="$4" name="$5"
-    echo "[wait-inference] ${name} -> ${base_url}/v1/completions (timeout ${timeout}s)"
-    srun --nodelist="$node" --nodes=1 --ntasks=1 bash -lc "
-        deadline=\$(( \$(date +%s) + ${timeout} ))
-        attempt=0
-        while true; do
-            attempt=\$((attempt + 1))
-            resp=\$(curl -sS -m 120 -X POST '${base_url}/v1/completions' \
-                -H 'Content-Type: application/json' \
-                -d '{\"model\":\"${model}\",\"prompt\":\"hi\",\"max_tokens\":4,\"temperature\":0}' 2>&1 || true)
-            text_len=\$(echo \"\$resp\" | python3 -c 'import sys,json
-try:
-    d=json.loads(sys.stdin.read())
-    print(len(d.get(\"choices\",[{}])[0].get(\"text\",\"\")))
-except Exception:
-    print(0)' 2>/dev/null || echo 0)
-            if [[ \"\$text_len\" -gt 0 ]]; then
-                echo \"[wait-inference][OK] ${name} ready (attempt #\${attempt}, text_len=\${text_len})\"
-                exit 0
-            fi
-            if [[ \$(date +%s) -ge \$deadline ]]; then
-                echo \"[wait-inference][FAIL] ${name} not ready after ${timeout}s (attempts=\${attempt})\"
-                echo \"[wait-inference] last response (truncated): \${resp:0:500}\"
-                exit 1
-            fi
-            sleep 15
-        done
-    "
-}
-
 # ======================== 1. start container ========================
-launch_container "$SERVER_NODE"
+echo "[docker] starting container on ${NODE}"
+NIC_TYPE=$(detect_nic_type)
+echo "[docker] NIC type detected: ${NIC_TYPE}"
+read -ra NIC_MOUNTS <<< "$(nic_mount_flags "${NIC_TYPE}")"
+if [[ ${#NIC_MOUNTS[@]} -gt 0 ]]; then
+    echo "[docker] RDMA mounts: ${NIC_MOUNTS[*]}"
+else
+    echo "[docker] no out-of-tree RDMA mounts needed"
+fi
+
+docker rm -f "${CONTAINER}" 2>/dev/null || true
+docker pull "${DOCKER_IMAGE}"
+docker run -d --name "${CONTAINER}" \
+    --network host --ipc host --privileged \
+    --device /dev/kfd --device /dev/dri \
+    --device /dev/infiniband \
+    --group-add video \
+    --cap-add IPC_LOCK --cap-add NET_ADMIN \
+    --ulimit memlock=-1 --ulimit stack=67108864 --ulimit nofile=65536:524288 \
+    --shm-size 128G \
+    -v /mnt:/mnt \
+    -v /data:/data \
+    -v /it-share:/it-share \
+    -v "${LOG_ROOT}/server":/workspace/logs \
+    -v "${LOG_ROOT}/bench":/workspace/benchmark_results \
+    -v "${LOG_ROOT}/gsm8k":/workspace/gsm8k_results \
+    "${NIC_MOUNTS[@]+"${NIC_MOUNTS[@]}"}" \
+    "${DOCKER_IMAGE}" sleep infinity
+
+docker inspect -f '{{.State.Status}}' "${CONTAINER}"
+docker exec "${CONTAINER}" bash -c '
+    sysctl -w net.core.somaxconn=4096 2>/dev/null || true
+    sysctl -w net.ipv4.tcp_max_syn_backlog=4096 2>/dev/null || true
+'
+echo "[docker] container ready on ${NODE}"
 
 # ======================== 2. start server (detached) ========================
-echo "[server] launching on ${SERVER_NODE}"
-srun --nodelist="$SERVER_NODE" --nodes=1 --ntasks=1 bash -lc "
-    docker exec -d '${CONTAINER}' bash '${LOG_ROOT}/scripts/server.sh'
-"
+echo "[server] launching on ${NODE}"
+docker exec -d "${CONTAINER}" bash "${LOG_ROOT}/scripts/server.sh"
 
 # ======================== 3. wait for server ========================
-wait_endpoint "$SERVER_NODE" "http://${SERVER_IP}:${SERVER_PORT}/health" \
-    "$WAIT_SERVER_TIMEOUT" "server-http"
+echo "[wait] server -> http://${NODE_IP}:${SERVER_PORT}/health (timeout ${WAIT_SERVER_TIMEOUT}s)"
+deadline=$(( $(date +%s) + WAIT_SERVER_TIMEOUT ))
+while ! curl -sf "http://${NODE_IP}:${SERVER_PORT}/health" >/dev/null 2>&1; do
+    if [[ $(date +%s) -ge $deadline ]]; then
+        echo "[wait][FAIL] server not ready after ${WAIT_SERVER_TIMEOUT}s"
+        exit 1
+    fi
+    sleep 10
+done
+echo "[wait][OK] server /health ready"
 
-wait_inference_ready "$SERVER_NODE" "http://${SERVER_IP}:${SERVER_PORT}" \
-    "$MODEL_PATH" "$WAIT_SERVER_TIMEOUT" "server-pipeline"
+# verify inference works
+echo "[wait-inference] probing /v1/completions..."
+deadline=$(( $(date +%s) + WAIT_SERVER_TIMEOUT ))
+attempt=0
+while true; do
+    attempt=$((attempt + 1))
+    resp=$(curl -sS -m 120 -X POST "http://${NODE_IP}:${SERVER_PORT}/v1/completions" \
+        -H 'Content-Type: application/json' \
+        -d "{\"model\":\"${MODEL_PATH}\",\"prompt\":\"hi\",\"max_tokens\":4,\"temperature\":0}" 2>&1 || true)
+    text_len=$(echo "$resp" | python3 -c 'import sys,json
+try:
+    d=json.loads(sys.stdin.read())
+    print(len(d.get("choices",[{}])[0].get("text","")))
+except Exception:
+    print(0)' 2>/dev/null || echo 0)
+    if [[ "$text_len" -gt 0 ]]; then
+        echo "[wait-inference][OK] server ready (attempt #${attempt}, text_len=${text_len})"
+        break
+    fi
+    if [[ $(date +%s) -ge $deadline ]]; then
+        echo "[wait-inference][FAIL] server not ready after ${WAIT_SERVER_TIMEOUT}s (attempts=${attempt})"
+        echo "[wait-inference] last response (truncated): ${resp:0:500}"
+        exit 1
+    fi
+    sleep 15
+done
 
 # ======================== 4. run gsm8k accuracy (foreground, optional) ========================
 if [[ "${RUN_GSM8K}" == "1" ]]; then
     echo ""
-    echo "=== running GSM8K accuracy eval on ${SERVER_NODE} ==="
-    srun --nodelist="$SERVER_NODE" --nodes=1 --ntasks=1 bash -lc "
-        docker exec '${CONTAINER}' bash '${LOG_ROOT}/scripts/gsm8k.sh'
-    "
+    echo "=== running GSM8K accuracy eval on ${NODE} ==="
+    docker exec "${CONTAINER}" bash "${LOG_ROOT}/scripts/gsm8k.sh"
 else
     echo "=== skipping GSM8K (RUN_GSM8K=${RUN_GSM8K}) ==="
 fi
 
-# ======================== 5. run benchmark (foreground) ========================
-echo ""
-echo "=== running benchmark on ${SERVER_NODE} ==="
-srun --nodelist="$SERVER_NODE" --nodes=1 --ntasks=1 bash -lc "
-    docker exec '${CONTAINER}' bash '${LOG_ROOT}/scripts/benchmark.sh'
-"
+# ======================== 5. run benchmark (optional) ========================
+if [[ "${RUN_BENCH}" == "1" ]]; then
+    echo ""
+    echo "=== running benchmark on ${NODE} ==="
+    docker exec "${CONTAINER}" bash "${LOG_ROOT}/scripts/benchmark.sh"
+else
+    echo "=== skipping benchmark (RUN_BENCH=${RUN_BENCH}) ==="
+fi
 
 echo ""
-echo "=== done at $(date -Is); results: ${LOG_ROOT}/bench  gsm8k: ${LOG_ROOT}/gsm8k ==="
+echo "=== done at $(date -Is); logs: ${LOG_ROOT} ==="

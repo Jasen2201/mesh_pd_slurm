@@ -35,7 +35,7 @@ PREFILL_PORT_2="${PREFILL_PORT_2:-8011}"
 DECODE_PORT="${DECODE_PORT:-8020}"
 ROUTER_PORT="${ROUTER_PORT:-8000}"
 HANDSHAKE_PORT_1="${HANDSHAKE_PORT_1:-6301}"
-HANDSHAKE_PORT_2="${HANDSHAKE_PORT_2:-6302}"
+HANDSHAKE_PORT_2="${HANDSHAKE_PORT_2:-6305}"  # must be >= HANDSHAKE_PORT_1 + PREFILL_TP to avoid mooncake port collision
 
 MEM_FRACTION="${MEM_FRACTION:-0.85}"
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8}"
@@ -129,7 +129,6 @@ mkdir -p /workspace/logs
 export HIP_VISIBLE_DEVICES=0,1,2,3
 export PYTHONUNBUFFERED=1
 export AITER_LOG_LEVEL=WARNING
-export 
 export ATOM_HOST_IP=${PREFILL_IP}
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 
@@ -138,7 +137,6 @@ rm -rf /root/.cache/atom/* 2>/dev/null || true
 python3 -m atom.entrypoints.openai_server \
     --model "${MODEL_PATH}" \
     --host 0.0.0.0 --server-port "${PREFILL_PORT_1}" \
-     \
     -tp "${PREFILL_TP}" \
     --kv_cache_dtype "${KV_CACHE_DTYPE}" \
     --block-size "${BLOCK_SIZE}" \
@@ -160,14 +158,12 @@ mkdir -p /workspace/logs
 export HIP_VISIBLE_DEVICES=4,5,6,7
 export PYTHONUNBUFFERED=1
 export AITER_LOG_LEVEL=WARNING
-export 
 export ATOM_HOST_IP=${PREFILL_IP}
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 
 python3 -m atom.entrypoints.openai_server \
     --model "${MODEL_PATH}" \
     --host 0.0.0.0 --server-port "${PREFILL_PORT_2}" \
-     \
     -tp "${PREFILL_TP}" \
     --kv_cache_dtype "${KV_CACHE_DTYPE}" \
     --block-size "${BLOCK_SIZE}" \
@@ -189,7 +185,6 @@ mkdir -p /workspace/logs
 export HIP_VISIBLE_DEVICES=0,1,2,3
 export PYTHONUNBUFFERED=1
 export AITER_LOG_LEVEL=WARNING
-export 
 export ATOM_HOST_IP=${DECODE_IP}
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 
@@ -198,7 +193,6 @@ rm -rf /root/.cache/atom/* 2>/dev/null || true
 python3 -m atom.entrypoints.openai_server \
     --model "${MODEL_PATH}" \
     --host 0.0.0.0 --server-port "${DECODE_PORT}" \
-     \
     -tp "${DECODE_TP}" \
     --kv_cache_dtype "${KV_CACHE_DTYPE}" \
     --block-size "${BLOCK_SIZE}" \
@@ -267,6 +261,7 @@ for GSM8K_CONC in "${GSM8K_CONCS[@]}"; do
     echo "========================================="
 
     lm_eval --model local-completions \
+        --model_args "model=${MODEL_PATH},base_url=http://127.0.0.1:${ROUTER_PORT}/v1/completions,num_concurrent=${GSM8K_CONC},max_retries=3,tokenized_requests=False" \
         --tasks gsm8k \
         --num_fewshot "${GSM8K_NUM_FEWSHOT}" \
         ${LIMIT_ARG} \
@@ -333,7 +328,6 @@ for ISL in "${ISLS[@]}"; do
             --random-range-ratio "${RANDOM_RANGE_RATIO}" \
             --num-prompts=$(( CONC * 10 )) \
             --max-concurrency="${CONC}" \
-             \
             --num-warmups=$(( 2 * CONC )) \
             --request-rate=inf \
             --ignore-eos \
