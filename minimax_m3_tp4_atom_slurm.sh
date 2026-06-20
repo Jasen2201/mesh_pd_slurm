@@ -130,6 +130,7 @@ python3 -m atom.entrypoints.openai_server \
     --max-model-len "${MAX_MODEL_LEN}" \
     --max-num-seqs "${MAX_NUM_SEQS}" \
     --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}" \
+    --no-enable_prefix_caching \
     ${EXTRA_SERVER_ARGS} \
     2>&1 | tee /workspace/logs/server.log
 SERVER_EOF
