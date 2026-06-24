@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=minimax-m3-1node-1p1d-tp4
+#SBATCH --job-name=minimax-m3-1node-1p1d-tp4-eagle3
 #SBATCH --account=amd-frameworks
 #SBATCH --partition=amd-frameworks
 #SBATCH --nodes=1
@@ -9,26 +9,28 @@
 #SBATCH --gres=gpu:8
 #SBATCH --exclusive
 #SBATCH --time=04:00:00
-#SBATCH --nodelist=mia1-p02-g47
-#SBATCH --output=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_1node_1p1d_tp4-%j.out
-#SBATCH --error=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_1node_1p1d_tp4-%j.err
+#SBATCH --nodelist=mia1-p02-g44
+#SBATCH --output=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_1node_1p1d_tp4_eagle3-%j.out
+#SBATCH --error=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_1node_1p1d_tp4_eagle3-%j.err
 #
-# Single-node 1P+1D PD-disaggregated benchmark for MiniMax-M3-MXFP4 on ATOM.
+# Single-node 1P+1D PD-disaggregated benchmark for MiniMax-M3-MXFP4 + EAGLE3
+# speculative decoding on ATOM.
 #   prefill: GPU 0-3 (TP=4, port 8010)
 #   decode:  GPU 4-7 (TP=4, port 8020)
 #   router:  port 8000
-#   All on the same node (g47).
 #
 # Usage:
 #   mkdir -p /it-share/yajizhan/slurm_minimax_logs
-#   sbatch minimax_m3_1node_1p_tp4_1d_tp4_atom_tp_slurm.sh
+#   sbatch minimax_m3_1node_1p_tp4_1d_tp4_eagle3_atom_tp_slurm.sh
 
 set -euo pipefail
 
 # ======================== configuration ========================
 MODEL_PATH="${MODEL_PATH:-/mnt/models/MiniMax-M3-MXFP4}"
+DRAFT_MODEL_PATH="${DRAFT_MODEL_PATH:-/mnt/models/MiniMax-M3-EAGLE3}"
+NUM_SPEC_TOKENS="${NUM_SPEC_TOKENS:-3}"
 DOCKER_IMAGE="${DOCKER_IMAGE:-rocm/atom-dev:MiniMax-M3-20260623}"
-CONTAINER="${CONTAINER:-atom_mesh_minimax_m3_1node_1p1d_tp4_${SLURM_JOB_ID}}"
+CONTAINER="${CONTAINER:-atom_mesh_minimax_m3_1node_1p1d_tp4_eagle3_${SLURM_JOB_ID}}"
 
 PREFILL_TP="${PREFILL_TP:-4}"
 DECODE_TP="${DECODE_TP:-4}"
@@ -59,7 +61,7 @@ GSM8K_NUM_CONCURRENT="${GSM8K_NUM_CONCURRENT:-32}"
 GSM8K_BATCH_SIZE="${GSM8K_BATCH_SIZE:-65}"
 GSM8K_MAX_GEN_TOKS="${GSM8K_MAX_GEN_TOKS:-16384}"
 
-LOG_ROOT="${LOG_ROOT:-/it-share/yajizhan/slurm_minimax_logs/$(date +%m%d)_minimax_m3_1node_1p1d_tp4_${SLURM_JOB_ID}}"
+LOG_ROOT="${LOG_ROOT:-/it-share/yajizhan/slurm_minimax_logs/$(date +%m%d)_minimax_m3_1node_1p1d_tp4_eagle3_${SLURM_JOB_ID}}"
 
 # ======================== pre-flight ========================
 echo "=== Job ${SLURM_JOB_ID} starting on $(hostname) at $(date -Is) ==="
@@ -94,14 +96,16 @@ NODE_IP=$(srun --nodelist="$NODE" --nodes=1 --ntasks=1 \
     bash -c "ip route get 1.1.1.1 | awk '/src/ {print \$7; exit}'")
 
 cat <<INFO
-=== Configuration (single-node 1P+1D) ===
+=== Configuration (single-node 1P+1D EAGLE3) ===
 NODE    : ${NODE} (IP=${NODE_IP})
 PREFILL : GPU 0-3 (TP=${PREFILL_TP}, port=${PREFILL_PORT})
 DECODE  : GPU 4-7 (TP=${DECODE_TP}, port=${DECODE_PORT})
 ROUTER  : ${NODE_IP}:${ROUTER_PORT}
 MODEL   : ${MODEL_PATH}
+DRAFT   : ${DRAFT_MODEL_PATH}
+SPEC_TOK: ${NUM_SPEC_TOKENS}
 IMAGE   : ${DOCKER_IMAGE}
-BACKEND : atom (PD mooncake KV transfer, pure TP, single-node)
+BACKEND : atom (PD mooncake KV transfer + EAGLE3, pure TP, single-node)
 RUN_GSM8K  : ${RUN_GSM8K} (limit=${GSM8K_LIMIT:-all}, fewshot=${GSM8K_NUM_FEWSHOT})
 ISL/OSL/CONC : ${ISL_LIST} / ${OSL} / ${CONC_LIST}
 LOG_ROOT: ${LOG_ROOT}
@@ -117,6 +121,7 @@ cat > "${LOG_ROOT}/scripts/prefill.sh" <<'PREFILL_EOF'
 set -euo pipefail
 
 echo "[prefill] IP=${NODE_IP} TP=${PREFILL_TP} port=${PREFILL_PORT} GPU=${PREFILL_GPU_IDS}"
+echo "[prefill] EAGLE3: draft=${DRAFT_MODEL_PATH} spec_tokens=${NUM_SPEC_TOKENS}"
 
 mkdir -p /workspace/logs
 
@@ -142,6 +147,9 @@ python3 -m atom.entrypoints.openai_server \
     --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}" \
     --kv-transfer-config '{"kv_role":"kv_producer","kv_connector":"mooncake","proxy_ip":"${NODE_IP}","handshake_port":${HANDSHAKE_PORT}}' \
     --no-enable_prefix_caching \
+    --method eagle3 \
+    --draft-model "${DRAFT_MODEL_PATH}" \
+    --num-speculative-tokens "${NUM_SPEC_TOKENS}" \
     ${EXTRA_SERVER_ARGS} \
     2>&1 | tee /workspace/logs/prefill.log
 PREFILL_EOF
@@ -151,6 +159,7 @@ cat > "${LOG_ROOT}/scripts/decode.sh" <<'DECODE_EOF'
 set -euo pipefail
 
 echo "[decode] IP=${NODE_IP} TP=${DECODE_TP} port=${DECODE_PORT} GPU=${DECODE_GPU_IDS}"
+echo "[decode] EAGLE3: draft=${DRAFT_MODEL_PATH} spec_tokens=${NUM_SPEC_TOKENS}"
 
 mkdir -p /workspace/logs
 
@@ -177,6 +186,9 @@ python3 -m atom.entrypoints.openai_server \
     --kv-transfer-config '{"kv_role":"kv_consumer","kv_connector":"mooncake","proxy_ip":"${NODE_IP}","handshake_port":${HANDSHAKE_PORT}}' \
     --cudagraph-capture-sizes "[1,2,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128,132,136,140,144,148,152,156,160,164,168,172,176,180,184,188,192,196,200,204,208,212,216,220,224,228,232,236,240,244,248,252,256]" \
     --no-enable_prefix_caching \
+    --method eagle3 \
+    --draft-model "${DRAFT_MODEL_PATH}" \
+    --num-speculative-tokens "${NUM_SPEC_TOKENS}" \
     ${EXTRA_SERVER_ARGS} \
     2>&1 | tee /workspace/logs/decode.log
 DECODE_EOF
@@ -227,7 +239,7 @@ fi
 
 IFS=',' read -ra GSM8K_CONCS <<< "${GSM8K_NUM_CONCURRENT}"
 for GSM8K_CONC in "${GSM8K_CONCS[@]}"; do
-    RUN_TAG="$(date +%Y%m%d%H%M%S)_gsm8k_minimax_m3_1node_1p1d_tp4_c${GSM8K_CONC}"
+    RUN_TAG="$(date +%Y%m%d%H%M%S)_gsm8k_minimax_m3_1node_1p1d_tp4_eagle3_c${GSM8K_CONC}"
     echo ""
     echo "========================================="
     echo "[gsm8k] running with concurrent=${GSM8K_CONC}"
@@ -288,7 +300,7 @@ IFS=',' read -ra CONCS <<< "${CONC_LIST}"
 
 for ISL in "${ISLS[@]}"; do
     for CONC in "${CONCS[@]}"; do
-        RESULT_FILENAME="pd-atom-minimax-m3-1node-1p1d-tp4-${ISL}-${OSL}-${CONC}-${RANDOM_RANGE_RATIO}"
+        RESULT_FILENAME="pd-atom-minimax-m3-eagle3-1node-1p1d-tp4-${ISL}-${OSL}-${CONC}-${RANDOM_RANGE_RATIO}"
         echo ""
         echo "========================================="
         echo "[bench] ISL=${ISL} OSL=${OSL} CONC=${CONC}"
@@ -325,7 +337,7 @@ from pathlib import Path
 import json
 
 result_dir = Path('${RESULT_DIR}')
-json_files = sorted(result_dir.glob('pd-atom-minimax-m3-1node-1p1d-tp4-*.json'))
+json_files = sorted(result_dir.glob('pd-atom-minimax-m3-eagle3-1node-1p1d-tp4-*.json'))
 if not json_files:
     print('No result files found')
     exit(0)
@@ -358,6 +370,8 @@ for script in "${LOG_ROOT}"/scripts/*.sh; do
         -e "s|\${ROUTER_PORT}|${ROUTER_PORT}|g" \
         -e "s|\${HANDSHAKE_PORT}|${HANDSHAKE_PORT}|g" \
         -e "s|\${MODEL_PATH}|${MODEL_PATH}|g" \
+        -e "s|\${DRAFT_MODEL_PATH}|${DRAFT_MODEL_PATH}|g" \
+        -e "s|\${NUM_SPEC_TOKENS}|${NUM_SPEC_TOKENS}|g" \
         -e "s|\${MEM_FRACTION}|${MEM_FRACTION}|g" \
         -e "s|\${BLOCK_SIZE}|${BLOCK_SIZE}|g" \
         -e "s|\${MAX_MODEL_LEN}|${MAX_MODEL_LEN}|g" \

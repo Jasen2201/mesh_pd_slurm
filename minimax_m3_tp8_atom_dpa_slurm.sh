@@ -24,7 +24,7 @@ set -euo pipefail
 
 # ======================== configuration ========================
 MODEL_PATH="${MODEL_PATH:-/mnt/models/MiniMax-M3-MXFP4}"
-DOCKER_IMAGE="${DOCKER_IMAGE:-rocm/atom-dev:MiniMax-M3-20260619}"
+DOCKER_IMAGE="${DOCKER_IMAGE:-rocm/atom-dev:MiniMax-M3-20260623}"
 CONTAINER="${CONTAINER:-atom_mesh_minimax_m3_tp8_dpa_${SLURM_JOB_ID}}"
 
 TP="${TP:-8}"
