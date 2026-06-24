@@ -136,7 +136,7 @@ mkdir -p /workspace/logs
 export HIP_VISIBLE_DEVICES=${PREFILL_GPU_IDS}
 export PYTHONUNBUFFERED=1
 export HSA_NO_SCRATCH_RECLAIM=1
-export AITER_QUICK_REDUCE_QUANTIZATION=INT4
+export ATOM_M3_SPARSE_USE_ASM_PA=1
 export ATOM_HOST_IP=__PREFILL_HANDSHAKE_IP__
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 
@@ -176,7 +176,7 @@ mkdir -p /workspace/logs
 export HIP_VISIBLE_DEVICES=${DECODE_GPU_IDS}
 export PYTHONUNBUFFERED=1
 export HSA_NO_SCRATCH_RECLAIM=1
-export AITER_QUICK_REDUCE_QUANTIZATION=INT4
+export ATOM_M3_SPARSE_USE_ASM_PA=1
 export ATOM_HOST_IP=${DECODE_IP}
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 

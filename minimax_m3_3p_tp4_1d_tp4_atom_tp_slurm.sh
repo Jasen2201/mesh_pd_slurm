@@ -45,7 +45,7 @@ HANDSHAKE_PORT3="${HANDSHAKE_PORT3:-6309}"  # >= HANDSHAKE_PORT2 + PREFILL_TP
 MEM_FRACTION="${MEM_FRACTION:-0.8}"
 BLOCK_SIZE="${BLOCK_SIZE:-128}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
-MAX_NUM_SEQS="${MAX_NUM_SEQS:-128}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-256}"
 DECODE_MAX_NUM_SEQS="${DECODE_MAX_NUM_SEQS:-1024}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-32768}"
 EXTRA_SERVER_ARGS="${EXTRA_SERVER_ARGS:-}"
@@ -142,7 +142,7 @@ mkdir -p /workspace/logroot/prefill1
 export HIP_VISIBLE_DEVICES=${PREFILL1_GPU_IDS}
 export PYTHONUNBUFFERED=1
 export HSA_NO_SCRATCH_RECLAIM=1
-export AITER_QUICK_REDUCE_QUANTIZATION=INT4
+export ATOM_M3_SPARSE_USE_ASM_PA=1
 export ATOM_HOST_IP=${PREFILL_IP}
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 
@@ -175,7 +175,7 @@ mkdir -p /workspace/logroot/prefill2
 export HIP_VISIBLE_DEVICES=${PREFILL2_GPU_IDS}
 export PYTHONUNBUFFERED=1
 export HSA_NO_SCRATCH_RECLAIM=1
-export AITER_QUICK_REDUCE_QUANTIZATION=INT4
+export ATOM_M3_SPARSE_USE_ASM_PA=1
 export ATOM_HOST_IP=${PREFILL_IP}
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 
@@ -208,7 +208,7 @@ mkdir -p /workspace/logroot/prefill3
 export HIP_VISIBLE_DEVICES=${PREFILL3_GPU_IDS}
 export PYTHONUNBUFFERED=1
 export HSA_NO_SCRATCH_RECLAIM=1
-export AITER_QUICK_REDUCE_QUANTIZATION=INT4
+export ATOM_M3_SPARSE_USE_ASM_PA=1
 export ATOM_HOST_IP=${DECODE_IP}
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 
@@ -241,7 +241,7 @@ mkdir -p /workspace/logroot/decode
 export HIP_VISIBLE_DEVICES=${DECODE_GPU_IDS}
 export PYTHONUNBUFFERED=1
 export HSA_NO_SCRATCH_RECLAIM=1
-export AITER_QUICK_REDUCE_QUANTIZATION=INT4
+export ATOM_M3_SPARSE_USE_ASM_PA=1
 export ATOM_HOST_IP=${DECODE_IP}
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 
