@@ -7,6 +7,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=114
 #SBATCH --gres=gpu:8
+#SBATCH --nodelist=mia1-p02-g42,mia1-p02-g44
 #SBATCH --exclusive
 #SBATCH --time=04:00:00
 #SBATCH --output=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_fp8_1p1d_tp4_dpa-%j.out
@@ -193,7 +194,7 @@ python3 -m atom.entrypoints.openai_server \
     --online_quant_config '{"global_quant_config": "ptpc_fp8", "exclude_layer": ["lm_head", "model.embed_tokens", "vision_tower", "multi_modal_projector", "patch_merge_mlp", "*.gate.*", "*.block_sparse_moe.experts*"]}' \
     ${HF_OVERRIDE_STR} \
     --kv-transfer-config '{"kv_role":"kv_consumer","kv_connector":"mooncake","proxy_ip":"${DECODE_IP}","handshake_port":${HANDSHAKE_PORT}}' \
-    --cudagraph-capture-sizes "[1,8,16,24,32,40,48,56,64,72,80,88,96,104,112,120,128,136,144,152,160,168,176,184,192,200,208,216,224,232,240,248,256]" \
+    --cudagraph-capture-sizes "[1,2,4,8,16,24,32,40,48,56,64,72,80,88,96,104,112,120,128,136,144,152,160,168,176,184,192,200,208,216,224,232,240,248,256]" \
     --no-enable_prefix_caching \
     ${EXTRA_SERVER_ARGS} \
     2>&1 | tee /workspace/logs/decode.log
