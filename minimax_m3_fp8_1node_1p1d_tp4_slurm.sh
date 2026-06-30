@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=minimax-m3-1node-1p1d-tp4-eagle3
+#SBATCH --job-name=minimax-m3-fp8-1node-1p1d-tp4
 #SBATCH --account=amd-frameworks
 #SBATCH --partition=amd-frameworks
 #SBATCH --nodes=1
@@ -9,28 +9,25 @@
 #SBATCH --gres=gpu:8
 #SBATCH --exclusive
 #SBATCH --time=04:00:00
-#SBATCH --nodelist=mia1-p02-g44
-#SBATCH --output=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_1node_1p1d_tp4_eagle3-%j.out
-#SBATCH --error=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_1node_1p1d_tp4_eagle3-%j.err
+#SBATCH --output=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_fp8_1node_1p1d_tp4-%j.out
+#SBATCH --error=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_fp8_1node_1p1d_tp4-%j.err
 #
-# Single-node 1P+1D PD-disaggregated benchmark for MiniMax-M3-MXFP4 + EAGLE3
-# speculative decoding on ATOM.
+# Single-node 1P+1D PD-disaggregated benchmark for MiniMax-M3-MXFP4 with FP8
+# online quantization on ATOM.
 #   prefill: GPU 0-3 (TP=4, port 8010)
 #   decode:  GPU 4-7 (TP=4, port 8020)
 #   router:  port 8000
 #
 # Usage:
 #   mkdir -p /it-share/yajizhan/slurm_minimax_logs
-#   sbatch minimax_m3_1node_1p_tp4_1d_tp4_eagle3_atom_tp_slurm.sh
+#   sbatch minimax_m3_fp8_1node_1p1d_tp4_slurm.sh
 
 set -euo pipefail
 
 # ======================== configuration ========================
 MODEL_PATH="${MODEL_PATH:-/mnt/models/MiniMax-M3-MXFP4}"
-DRAFT_MODEL_PATH="${DRAFT_MODEL_PATH:-/mnt/models/MiniMax-M3-EAGLE3}"
-NUM_SPEC_TOKENS="${NUM_SPEC_TOKENS:-3}"
-DOCKER_IMAGE="${DOCKER_IMAGE:-rocm/atom-dev:MiniMax-M3-20260624}"
-CONTAINER="${CONTAINER:-atom_mesh_minimax_m3_1node_1p1d_tp4_eagle3_${SLURM_JOB_ID}}"
+DOCKER_IMAGE="${DOCKER_IMAGE:-rocm/atom-dev:MiniMax-M3-20260630}"
+CONTAINER="${CONTAINER:-atom_mesh_minimax_m3_fp8_1node_1p1d_tp4_${SLURM_JOB_ID}}"
 
 PREFILL_TP="${PREFILL_TP:-4}"
 DECODE_TP="${DECODE_TP:-4}"
@@ -46,6 +43,13 @@ MAX_NUM_SEQS="${MAX_NUM_SEQS:-256}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-32768}"
 EXTRA_SERVER_ARGS="${EXTRA_SERVER_ARGS:-}"
 
+DEFAULT_HF_OVERRIDES='{"use_index_cache": true, "index_topk_freq": 4}'
+HF_OVERRIDES="${HF_OVERRIDES:-${DEFAULT_HF_OVERRIDES}}"
+HF_OVERRIDE_ARGS=()
+if [[ -n "${HF_OVERRIDES}" ]]; then
+    HF_OVERRIDE_ARGS=(--hf-overrides "${HF_OVERRIDES}")
+fi
+
 ISL_LIST="${ISL_LIST:-8192}"
 OSL="${OSL:-1024}"
 CONC_LIST="${CONC_LIST:-1,2,4,8,16,32,64,128,256}"
@@ -57,11 +61,11 @@ WAIT_ROUTER_TIMEOUT="${WAIT_ROUTER_TIMEOUT:-300}"
 RUN_GSM8K="${RUN_GSM8K:-1}"
 GSM8K_LIMIT="${GSM8K_LIMIT:-}"
 GSM8K_NUM_FEWSHOT="${GSM8K_NUM_FEWSHOT:-5}"
-GSM8K_NUM_CONCURRENT="${GSM8K_NUM_CONCURRENT:-32}"
+GSM8K_NUM_CONCURRENT="${GSM8K_NUM_CONCURRENT:-64,256}"
 GSM8K_BATCH_SIZE="${GSM8K_BATCH_SIZE:-65}"
 GSM8K_MAX_GEN_TOKS="${GSM8K_MAX_GEN_TOKS:-16384}"
 
-LOG_ROOT="${LOG_ROOT:-/it-share/yajizhan/slurm_minimax_logs/$(date +%m%d)_minimax_m3_1node_1p1d_tp4_eagle3_${SLURM_JOB_ID}}"
+LOG_ROOT="${LOG_ROOT:-/it-share/yajizhan/slurm_minimax_logs/$(date +%m%d)_minimax_m3_fp8_1node_1p1d_tp4_${SLURM_JOB_ID}}"
 
 # ======================== pre-flight ========================
 echo "=== Job ${SLURM_JOB_ID} starting on $(hostname) at $(date -Is) ==="
@@ -96,16 +100,14 @@ NODE_IP=$(srun --nodelist="$NODE" --nodes=1 --ntasks=1 \
     bash -c "ip route get 1.1.1.1 | awk '/src/ {print \$7; exit}'")
 
 cat <<INFO
-=== Configuration (single-node 1P+1D EAGLE3) ===
+=== Configuration (single-node 1P+1D FP8) ===
 NODE    : ${NODE} (IP=${NODE_IP})
 PREFILL : GPU 0-3 (TP=${PREFILL_TP}, port=${PREFILL_PORT})
 DECODE  : GPU 4-7 (TP=${DECODE_TP}, port=${DECODE_PORT})
 ROUTER  : ${NODE_IP}:${ROUTER_PORT}
 MODEL   : ${MODEL_PATH}
-DRAFT   : ${DRAFT_MODEL_PATH}
-SPEC_TOK: ${NUM_SPEC_TOKENS}
 IMAGE   : ${DOCKER_IMAGE}
-BACKEND : atom (PD mooncake KV transfer + EAGLE3, pure TP, single-node)
+BACKEND : atom (PD mooncake KV transfer, pure TP, single-node)
 RUN_GSM8K  : ${RUN_GSM8K} (limit=${GSM8K_LIMIT:-all}, fewshot=${GSM8K_NUM_FEWSHOT})
 ISL/OSL/CONC : ${ISL_LIST} / ${OSL} / ${CONC_LIST}
 LOG_ROOT: ${LOG_ROOT}
@@ -121,18 +123,14 @@ cat > "${LOG_ROOT}/scripts/prefill.sh" <<'PREFILL_EOF'
 set -euo pipefail
 
 echo "[prefill] IP=${NODE_IP} TP=${PREFILL_TP} port=${PREFILL_PORT} GPU=${PREFILL_GPU_IDS}"
-echo "[prefill] EAGLE3: draft=${DRAFT_MODEL_PATH} spec_tokens=${NUM_SPEC_TOKENS}"
 
 mkdir -p /workspace/logs
 
 export HIP_VISIBLE_DEVICES=${PREFILL_GPU_IDS}
 export PYTHONUNBUFFERED=1
-export AITER_LOG_LEVEL=WARNING
 export HSA_NO_SCRATCH_RECLAIM=1
-export ATOM_M3_SPARSE_USE_ASM_PA=1
 export AITER_QUICK_REDUCE_QUANTIZATION=INT4
-export ATOM_ENABLE_ALLREDUCE_RMSNORM_FUSION=1
-export AITER_QUICK_REDUCE_CAST_BF16_TO_FP16=0
+export ATOM_FORCE_ATTN_TRITON=1
 export ATOM_HOST_IP=${NODE_IP}
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 
@@ -143,16 +141,16 @@ python3 -m atom.entrypoints.openai_server \
     --host 0.0.0.0 --server-port "${PREFILL_PORT}" \
     --trust-remote-code \
     --tensor-parallel-size "${PREFILL_TP}" \
-    --gpu-memory-utilization "${MEM_FRACTION}" \
+    --kv_cache_dtype fp8 \
     --block-size "${BLOCK_SIZE}" \
+    --gpu-memory-utilization "${MEM_FRACTION}" \
     --max-model-len "${MAX_MODEL_LEN}" \
     --max-num-seqs "${MAX_NUM_SEQS}" \
     --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}" \
+    --online_quant_config '{"global_quant_config": "ptpc_fp8", "exclude_layer": ["lm_head", "model.embed_tokens", "vision_tower", "multi_modal_projector", "patch_merge_mlp", "*.gate.*", "*.block_sparse_moe.experts*"]}' \
     --kv-transfer-config '{"kv_role":"kv_producer","kv_connector":"mooncake","proxy_ip":"${NODE_IP}","handshake_port":${HANDSHAKE_PORT}}' \
     --no-enable_prefix_caching \
-    --method eagle3 \
-    --draft-model "${DRAFT_MODEL_PATH}" \
-    --num-speculative-tokens "${NUM_SPEC_TOKENS}" \
+    ${HF_OVERRIDE_ARGS} \
     ${EXTRA_SERVER_ARGS} \
     2>&1 | tee /workspace/logs/prefill.log
 PREFILL_EOF
@@ -162,18 +160,14 @@ cat > "${LOG_ROOT}/scripts/decode.sh" <<'DECODE_EOF'
 set -euo pipefail
 
 echo "[decode] IP=${NODE_IP} TP=${DECODE_TP} port=${DECODE_PORT} GPU=${DECODE_GPU_IDS}"
-echo "[decode] EAGLE3: draft=${DRAFT_MODEL_PATH} spec_tokens=${NUM_SPEC_TOKENS}"
 
 mkdir -p /workspace/logs
 
 export HIP_VISIBLE_DEVICES=${DECODE_GPU_IDS}
 export PYTHONUNBUFFERED=1
-export AITER_LOG_LEVEL=WARNING
 export HSA_NO_SCRATCH_RECLAIM=1
-export ATOM_M3_SPARSE_USE_ASM_PA=1
 export AITER_QUICK_REDUCE_QUANTIZATION=INT4
-export ATOM_ENABLE_ALLREDUCE_RMSNORM_FUSION=1
-export AITER_QUICK_REDUCE_CAST_BF16_TO_FP16=0
+export ATOM_FORCE_ATTN_TRITON=1
 export ATOM_HOST_IP=${NODE_IP}
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 
@@ -184,17 +178,17 @@ python3 -m atom.entrypoints.openai_server \
     --host 0.0.0.0 --server-port "${DECODE_PORT}" \
     --trust-remote-code \
     --tensor-parallel-size "${DECODE_TP}" \
-    --gpu-memory-utilization "${MEM_FRACTION}" \
+    --kv_cache_dtype fp8 \
     --block-size "${BLOCK_SIZE}" \
+    --gpu-memory-utilization "${MEM_FRACTION}" \
     --max-model-len "${MAX_MODEL_LEN}" \
     --max-num-seqs "${MAX_NUM_SEQS}" \
     --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}" \
+    --online_quant_config '{"global_quant_config": "ptpc_fp8", "exclude_layer": ["lm_head", "model.embed_tokens", "vision_tower", "multi_modal_projector", "patch_merge_mlp", "*.gate.*", "*.block_sparse_moe.experts*"]}' \
     --kv-transfer-config '{"kv_role":"kv_consumer","kv_connector":"mooncake","proxy_ip":"${NODE_IP}","handshake_port":${HANDSHAKE_PORT}}' \
-    --cudagraph-capture-sizes "[1,2,4,8,16,24,32,40,48,56,64,72,80,88,96,104,112,120,128,136,144,152,160,168,176,184,192,200,208,216,224,232,240,248,256,264,272,280,288,296,304,312,320,328,336,344,352,360,368,376,384,392,400,408,416,424,432,440,448,456,464,472,480,488,496,504,512,520,528,536,544,552,560,568,576,584,592,600,608,616,624,632,640,648,656,664,672,680,688,696,704,712,720,728,736,744,752,760,768,776,784,792,800,808,816,824,832,840,848,856,864,872,880,888,896,904,912,920,928,936,944,952,960,968,976,984,992,1000,1008,1016,1024]" \
+    --cudagraph-capture-sizes "[1,8,16,24,32,40,48,56,64,72,80,88,96,104,112,120,128,136,144,152,160,168,176,184,192,200,208,216,224,232,240,248,256]" \
     --no-enable_prefix_caching \
-    --method eagle3 \
-    --draft-model "${DRAFT_MODEL_PATH}" \
-    --num-speculative-tokens "${NUM_SPEC_TOKENS}" \
+    ${HF_OVERRIDE_ARGS} \
     ${EXTRA_SERVER_ARGS} \
     2>&1 | tee /workspace/logs/decode.log
 DECODE_EOF
@@ -245,7 +239,7 @@ fi
 
 IFS=',' read -ra GSM8K_CONCS <<< "${GSM8K_NUM_CONCURRENT}"
 for GSM8K_CONC in "${GSM8K_CONCS[@]}"; do
-    RUN_TAG="$(date +%Y%m%d%H%M%S)_gsm8k_minimax_m3_1node_1p1d_tp4_eagle3_c${GSM8K_CONC}"
+    RUN_TAG="$(date +%Y%m%d%H%M%S)_gsm8k_minimax_m3_fp8_1node_1p1d_tp4_c${GSM8K_CONC}"
     echo ""
     echo "========================================="
     echo "[gsm8k] running with concurrent=${GSM8K_CONC}"
@@ -306,7 +300,7 @@ IFS=',' read -ra CONCS <<< "${CONC_LIST}"
 
 for ISL in "${ISLS[@]}"; do
     for CONC in "${CONCS[@]}"; do
-        RESULT_FILENAME="pd-atom-minimax-m3-eagle3-1node-1p1d-tp4-${ISL}-${OSL}-${CONC}-${RANDOM_RANGE_RATIO}"
+        RESULT_FILENAME="pd-atom-minimax-m3-fp8-1node-1p1d-tp4-${ISL}-${OSL}-${CONC}-${RANDOM_RANGE_RATIO}"
         echo ""
         echo "========================================="
         echo "[bench] ISL=${ISL} OSL=${OSL} CONC=${CONC}"
@@ -343,7 +337,7 @@ from pathlib import Path
 import json
 
 result_dir = Path('${RESULT_DIR}')
-json_files = sorted(result_dir.glob('pd-atom-minimax-m3-eagle3-1node-1p1d-tp4-*.json'))
+json_files = sorted(result_dir.glob('pd-atom-minimax-m3-fp8-1node-1p1d-tp4-*.json'))
 if not json_files:
     print('No result files found')
     exit(0)
@@ -376,8 +370,6 @@ for script in "${LOG_ROOT}"/scripts/*.sh; do
         -e "s|\${ROUTER_PORT}|${ROUTER_PORT}|g" \
         -e "s|\${HANDSHAKE_PORT}|${HANDSHAKE_PORT}|g" \
         -e "s|\${MODEL_PATH}|${MODEL_PATH}|g" \
-        -e "s|\${DRAFT_MODEL_PATH}|${DRAFT_MODEL_PATH}|g" \
-        -e "s|\${NUM_SPEC_TOKENS}|${NUM_SPEC_TOKENS}|g" \
         -e "s|\${MEM_FRACTION}|${MEM_FRACTION}|g" \
         -e "s|\${BLOCK_SIZE}|${BLOCK_SIZE}|g" \
         -e "s|\${MAX_MODEL_LEN}|${MAX_MODEL_LEN}|g" \
@@ -386,6 +378,7 @@ for script in "${LOG_ROOT}"/scripts/*.sh; do
         -e "s|\${PREFILL_GPU_IDS}|${PREFILL_GPU_IDS}|g" \
         -e "s|\${DECODE_GPU_IDS}|${DECODE_GPU_IDS}|g" \
         -e "s|\${EXTRA_SERVER_ARGS}|${EXTRA_SERVER_ARGS}|g" \
+        -e "s|\${HF_OVERRIDE_ARGS}|${HF_OVERRIDE_ARGS[*]}|g" \
         -e "s|\${ISL_LIST}|${ISL_LIST}|g" \
         -e "s|\${OSL}|${OSL}|g" \
         -e "s|\${CONC_LIST}|${CONC_LIST}|g" \
@@ -480,18 +473,12 @@ nic_mount_flags() {
                 flags+=(-v "$host_ibverbs:/lib/x86_64-linux-gnu/libibverbs.so.1")
             fi
             for lib in /usr/local/lib/libbnxt_re-rdmav*.so; do
-                if [[ -f "$lib" ]]; then
-                    flags+=(-v "$lib:/usr/lib/x86_64-linux-gnu/libibverbs/$(basename "$lib")")
-                fi
+                [[ -f "$lib" ]] && flags+=(-v "$lib:/usr/lib/x86_64-linux-gnu/libibverbs/$(basename "$lib")")
             done
             for lib in /usr/local/lib/libbnxt_re.so; do
-                if [[ -f "$lib" ]]; then
-                    flags+=(-v "$lib:/usr/lib/x86_64-linux-gnu/$(basename "$lib")")
-                fi
+                [[ -f "$lib" ]] && flags+=(-v "$lib:/usr/lib/x86_64-linux-gnu/$(basename "$lib")")
             done
-            if [[ -d /etc/libibverbs.d ]]; then
-                flags+=(-v /etc/libibverbs.d:/etc/libibverbs.d:ro)
-            fi
+            [[ -d /etc/libibverbs.d ]] && flags+=(-v /etc/libibverbs.d:/etc/libibverbs.d:ro)
             ;;
         ionic)
             local host_ibverbs
@@ -503,11 +490,8 @@ nic_mount_flags() {
             for dir in "${ionic_dirs[@]}"; do
                 for lib in "$dir"/libionic*.so; do
                     if [[ -f "$lib" ]]; then
-                        local real
-                        real=$(readlink -f "$lib")
-                        if [[ -f "$real" ]]; then
-                            flags+=(-v "$real:$real")
-                        fi
+                        local real; real=$(readlink -f "$lib")
+                        [[ -f "$real" ]] && flags+=(-v "$real:$real")
                         flags+=(-v "$lib:/usr/lib/x86_64-linux-gnu/$(basename "$lib")")
                     fi
                 done
@@ -515,17 +499,12 @@ nic_mount_flags() {
             local provider_dir=/usr/lib/x86_64-linux-gnu/libibverbs
             if [[ -d "$provider_dir" ]]; then
                 for lib in "$provider_dir"/libionic-rdmav*.so; do
-                    if [[ -f "$lib" ]]; then
-                        flags+=(-v "$lib:$lib")
-                    fi
+                    [[ -f "$lib" ]] && flags+=(-v "$lib:$lib")
                 done
             fi
-            if [[ -d /etc/libibverbs.d ]]; then
-                flags+=(-v /etc/libibverbs.d:/etc/libibverbs.d:ro)
-            fi
+            [[ -d /etc/libibverbs.d ]] && flags+=(-v /etc/libibverbs.d:/etc/libibverbs.d:ro)
             ;;
-        mlx5)
-            ;;
+        mlx5) ;;
     esac
     echo "${flags[@]}"
 }

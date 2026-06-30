@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=minimax-m3-2p-tp8-1d-tp8-atom-dpa
+#SBATCH --job-name=minimax-m3-fp8-2p1d-tp4-dpa
 #SBATCH --account=amd-frameworks
 #SBATCH --partition=amd-frameworks
 #SBATCH --nodes=3
@@ -9,27 +9,30 @@
 #SBATCH --gres=gpu:8
 #SBATCH --exclusive
 #SBATCH --time=04:00:00
-#SBATCH --nodelist=mia1-p02-g42,mia1-p02-g44,mia1-p02-g47
-#SBATCH --output=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_2p_tp8_1d_tp8_atom_dpa-%j.out
-#SBATCH --error=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_2p_tp8_1d_tp8_atom_dpa-%j.err
+#SBATCH --output=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_fp8_2p1d_tp4_dpa-%j.out
+#SBATCH --error=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_fp8_2p1d_tp4_dpa-%j.err
+
 #
-# 2P+1D PD-disaggregated benchmark for MiniMax-M3-MXFP4 on ATOM with DPA.
-#   prefill: TP=8 (2 instances, 1 node each), decode: TP=8 (1 instance), --enable-dp-attention.
-#   3 nodes total: 2 prefill + 1 decode.
+# 2P+1D PD-disaggregated benchmark for MiniMax-M3-MXFP4 (FP8 online quant)
+# on ATOM with DPA.
+#   prefill: TP=4 (2 instances, 1 node each), decode: TP=4 (1 instance), --enable-dp-attention.
+#   3 nodes total: node0=prefill-1, node1=prefill-2, node2=decode.
+#   Each instance runs in its own container so ATOM's hardcoded port 29500 never conflicts.
 #
 # Usage:
 #   mkdir -p /it-share/yajizhan/slurm_minimax_logs
-#   sbatch minimax_m3_2p_tp8_1d_tp8_atom_dpa_slurm.sh
+#   sbatch minimax_m3_fp8_2p1d_tp4_dpa_slurm.sh
 
 set -euo pipefail
 
-# ======================== configuration ========================
-MODEL_PATH="${MODEL_PATH:-/mnt/models/MiniMax-M3-MXFP4}"
-DOCKER_IMAGE="${DOCKER_IMAGE:-rocm/atom-dev:MiniMax-M3-20260624}"
-CONTAINER="${CONTAINER:-atom_mesh_minimax_m3_2p1d_dpa_${SLURM_JOB_ID}}"
+# ── configuration ───────────────────────────────────────────────────────────────
 
-PREFILL_TP="${PREFILL_TP:-8}"
-DECODE_TP="${DECODE_TP:-8}"
+MODEL_PATH="${MODEL_PATH:-/mnt/models/MiniMax-M3-MXFP4}"
+DOCKER_IMAGE="${DOCKER_IMAGE:-rocm/atom-dev:MiniMax-M3-20260630}"
+CONTAINER="${CONTAINER:-atom_mesh_minimax_m3_fp8_2p1d_tp4_dpa_${SLURM_JOB_ID}}"
+
+PREFILL_TP="${PREFILL_TP:-4}"
+DECODE_TP="${DECODE_TP:-4}"
 PREFILL_PORT="${PREFILL_PORT:-8010}"
 DECODE_PORT="${DECODE_PORT:-8020}"
 ROUTER_PORT="${ROUTER_PORT:-8000}"
@@ -45,7 +48,7 @@ EXTRA_SERVER_ARGS="${EXTRA_SERVER_ARGS:-}"
 
 ISL_LIST="${ISL_LIST:-8192}"
 OSL="${OSL:-1024}"
-CONC_LIST="${CONC_LIST:-512,768,1024}"
+CONC_LIST="${CONC_LIST:-256,512,768,1024}"
 RANDOM_RANGE_RATIO="${RANDOM_RANGE_RATIO:-0.8}"
 
 WAIT_SERVER_TIMEOUT="${WAIT_SERVER_TIMEOUT:-1800}"
@@ -54,19 +57,29 @@ WAIT_ROUTER_TIMEOUT="${WAIT_ROUTER_TIMEOUT:-300}"
 RUN_GSM8K="${RUN_GSM8K:-1}"
 GSM8K_LIMIT="${GSM8K_LIMIT:-}"
 GSM8K_NUM_FEWSHOT="${GSM8K_NUM_FEWSHOT:-5}"
-GSM8K_NUM_CONCURRENT="${GSM8K_NUM_CONCURRENT:-32}"
+GSM8K_NUM_CONCURRENT="${GSM8K_NUM_CONCURRENT:-256,512,768,1024}"
 GSM8K_BATCH_SIZE="${GSM8K_BATCH_SIZE:-65}"
 GSM8K_MAX_GEN_TOKS="${GSM8K_MAX_GEN_TOKS:-16384}"
 
-LOG_ROOT="${LOG_ROOT:-/it-share/yajizhan/slurm_minimax_logs/$(date +%m%d)_minimax_m3_2p_tp8_1d_tp8_atom_dpa_${SLURM_JOB_ID}}"
+LOG_ROOT="${LOG_ROOT:-/it-share/yajizhan/slurm_minimax_logs/$(date +%m%d)_minimax_m3_fp8_2p1d_tp4_dpa_${SLURM_JOB_ID}}"
 
-# ======================== pre-flight ========================
-echo "=== Job ${SLURM_JOB_ID} starting on $(hostname) at $(date -Is) ==="
-mapfile -t NODES < <(scontrol show hostnames "$SLURM_JOB_NODELIST")
-if [[ "${#NODES[@]}" -ne 3 ]]; then
-    echo "ERROR: expected 3 nodes, got ${#NODES[@]}: ${NODES[*]}" >&2
+# ── hf overrides ───────────────────────────────────────────────────────────────
+
+DEFAULT_HF_OVERRIDES='{"use_index_cache": true, "index_topk_freq": 4}'
+HF_OVERRIDES="${HF_OVERRIDES:-${DEFAULT_HF_OVERRIDES}}"
+HF_OVERRIDE_ARGS=()
+if [[ -n "${HF_OVERRIDES}" ]]; then
+    HF_OVERRIDE_ARGS=(--hf-overrides "${HF_OVERRIDES}")
+fi
+
+# ── pre-flight ──────────────────────────────────────────────────────────────────
+
+IFS=',' read -ra NODES <<< "$(scontrol show hostnames "$SLURM_JOB_NODELIST" | paste -sd,)"
+if [[ ${#NODES[@]} -ne 3 ]]; then
+    echo "FATAL: expected 3 nodes, got ${#NODES[@]}: ${NODES[*]}"
     exit 1
 fi
+
 PREFILL_NODE_1="${NODES[0]}"
 PREFILL_NODE_2="${NODES[1]}"
 DECODE_NODE="${NODES[2]}"
@@ -74,37 +87,22 @@ ALL_NODES=("$PREFILL_NODE_1" "$PREFILL_NODE_2" "$DECODE_NODE")
 
 mkdir -p "${LOG_ROOT}"/{prefill_1,prefill_2,decode,router,bench,gsm8k,scripts}
 
-# ======================== pre-cleanup ========================
-echo "=== pre-cleanup: force-stopping all docker containers on all nodes ==="
-for node in "${ALL_NODES[@]}"; do
-    srun --nodelist="$node" --nodes=1 --ntasks=1 --time=00:03:00 bash -c '
-        hostname
-        running=$(docker ps -q)
-        if [[ -n "$running" ]]; then
-            echo "  stopping $(echo "$running" | wc -l) running containers:"
-            docker ps --format "    {{.ID}} {{.Names}}"
-            docker stop -t 0 $running 2>&1 | sed "s/^/    /"
-        else
-            echo "  no running containers"
-        fi
-        sleep 2
-        used=$(rocm-smi --showmemuse 2>/dev/null | grep "VRAM%" | grep -v ": 0$" | head -5)
-        if [[ -n "$used" ]]; then
-            echo "  WARNING: some GPUs still have VRAM allocated:"
-            echo "$used" | sed "s/^/    /"
-        else
-            echo "  all GPUs free"
-        fi
-    ' || echo "[pre-cleanup] WARNING: cleanup on $node had errors (non-fatal)"
-done
-echo "=== pre-cleanup done ==="
+# ── pre-cleanup ─────────────────────────────────────────────────────────────────
 
-PREFILL_IP_1=$(srun --nodelist="$PREFILL_NODE_1" --nodes=1 --ntasks=1 \
-    bash -c "ip route get 1.1.1.1 | awk '/src/ {print \$7; exit}'")
-PREFILL_IP_2=$(srun --nodelist="$PREFILL_NODE_2" --nodes=1 --ntasks=1 \
-    bash -c "ip route get 1.1.1.1 | awk '/src/ {print \$7; exit}'")
-DECODE_IP=$(srun --nodelist="$DECODE_NODE" --nodes=1 --ntasks=1 \
-    bash -c "ip route get 1.1.1.1 | awk '/src/ {print \$7; exit}'")
+for node in "${ALL_NODES[@]}"; do
+    srun --nodelist="$node" --nodes=1 --ntasks=1 bash -lc "
+        docker rm -f '${CONTAINER}' 2>/dev/null || true
+    " &
+done
+wait
+
+# ── IP detection ────────────────────────────────────────────────────────────────
+
+PREFILL_IP_1=$(srun --nodelist="$PREFILL_NODE_1" --nodes=1 --ntasks=1 bash -lc "hostname -I | awk '{print \$1}'")
+PREFILL_IP_2=$(srun --nodelist="$PREFILL_NODE_2" --nodes=1 --ntasks=1 bash -lc "hostname -I | awk '{print \$1}'")
+DECODE_IP=$(srun --nodelist="$DECODE_NODE" --nodes=1 --ntasks=1 bash -lc "hostname -I | awk '{print \$1}'")
+
+# ── configuration display ──────────────────────────────────────────────────────
 
 cat <<INFO
 === Configuration ===
@@ -114,53 +112,50 @@ DECODE    : ${DECODE_NODE}     (IP=${DECODE_IP},    TP=${DECODE_TP},  port=${DEC
 ROUTER    : ${PREFILL_IP_1}:${ROUTER_PORT}
 MODEL     : ${MODEL_PATH}
 IMAGE     : ${DOCKER_IMAGE}
-BACKEND   : atom (PD mooncake KV transfer, DPA)
+BACKEND   : atom (PD mooncake KV transfer, FP8 online quant, DPA)
 RUN_GSM8K : ${RUN_GSM8K} (limit=${GSM8K_LIMIT:-all}, fewshot=${GSM8K_NUM_FEWSHOT})
 ISL/OSL/CONC : ${ISL_LIST} / ${OSL} / ${CONC_LIST}
 LOG_ROOT  : ${LOG_ROOT}
 =====================
 INFO
 
-# ======================== generate in-container scripts ========================
+# ── GPU IDs ─────────────────────────────────────────────────────────────────────
+
 PREFILL_GPU_IDS=$(seq -s, 0 $((PREFILL_TP - 1)))
 DECODE_GPU_IDS=$(seq -s, 0 $((DECODE_TP - 1)))
 
-cat > "${LOG_ROOT}/scripts/prefill.sh.tmpl" <<'PREFILL_EOF'
+# ── prefill script (template) ──────────────────────────────────────────────────
+
+cat > "${LOG_ROOT}/scripts/prefill.sh.tmpl" << 'PREFILL_SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
-
-echo "[prefill] IP=__PREFILL_HANDSHAKE_IP__ TP=${PREFILL_TP} port=${PREFILL_PORT}"
-
-mkdir -p /workspace/logs
 
 export HIP_VISIBLE_DEVICES=${PREFILL_GPU_IDS}
 export PYTHONUNBUFFERED=1
 export HSA_NO_SCRATCH_RECLAIM=1
-export ATOM_M3_SPARSE_USE_ASM_PA=1
 export AITER_QUICK_REDUCE_QUANTIZATION=INT4
-export ATOM_ENABLE_ALLREDUCE_RMSNORM_FUSION=1
-export AITER_QUICK_REDUCE_CAST_BF16_TO_FP16=0
+export ATOM_FORCE_ATTN_TRITON=1
 export ATOM_HOST_IP=__PREFILL_HANDSHAKE_IP__
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
-
-rm -rf /root/.cache/atom/* 2>/dev/null || true
 
 python3 -m atom.entrypoints.openai_server \
     --model "${MODEL_PATH}" \
     --host 0.0.0.0 --server-port "${PREFILL_PORT}" \
     --trust-remote-code \
     -tp "${PREFILL_TP}" \
-    --enable-dp-attention \
+    --enable-dp-attention --enable-tbo prefill \
     --gpu-memory-utilization "${MEM_FRACTION}" \
-    --block-size "${BLOCK_SIZE}" \
+    --kv_cache_dtype fp8 --block-size "${BLOCK_SIZE}" \
     --max-model-len "${MAX_MODEL_LEN}" \
     --max-num-seqs "${MAX_NUM_SEQS}" \
     --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}" \
+    --online_quant_config '{"global_quant_config": "ptpc_fp8", "exclude_layer": ["lm_head", "model.embed_tokens", "vision_tower", "multi_modal_projector", "patch_merge_mlp", "*.gate.*", "*.block_sparse_moe.experts*"]}' \
+    ${HF_OVERRIDE_STR} \
     --kv-transfer-config '{"kv_role":"kv_producer","kv_connector":"mooncake","proxy_ip":"__PREFILL_HANDSHAKE_IP__","handshake_port":${HANDSHAKE_PORT}}' \
     --no-enable_prefix_caching \
     ${EXTRA_SERVER_ARGS} \
     2>&1 | tee /workspace/logs/prefill.log
-PREFILL_EOF
+PREFILL_SCRIPT
 
 sed "s|__PREFILL_HANDSHAKE_IP__|${PREFILL_IP_1}|g" \
     "${LOG_ROOT}/scripts/prefill.sh.tmpl" > "${LOG_ROOT}/scripts/prefill_1.sh"
@@ -168,25 +163,19 @@ sed "s|__PREFILL_HANDSHAKE_IP__|${PREFILL_IP_2}|g" \
     "${LOG_ROOT}/scripts/prefill.sh.tmpl" > "${LOG_ROOT}/scripts/prefill_2.sh"
 rm "${LOG_ROOT}/scripts/prefill.sh.tmpl"
 
-cat > "${LOG_ROOT}/scripts/decode.sh" <<'DECODE_EOF'
+# ── decode script ───────────────────────────────────────────────────────────────
+
+cat > "${LOG_ROOT}/scripts/decode.sh" << 'DECODE_SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
-
-echo "[decode] IP=${DECODE_IP} TP=${DECODE_TP} port=${DECODE_PORT}"
-
-mkdir -p /workspace/logs
 
 export HIP_VISIBLE_DEVICES=${DECODE_GPU_IDS}
 export PYTHONUNBUFFERED=1
 export HSA_NO_SCRATCH_RECLAIM=1
-export ATOM_M3_SPARSE_USE_ASM_PA=1
 export AITER_QUICK_REDUCE_QUANTIZATION=INT4
-export ATOM_ENABLE_ALLREDUCE_RMSNORM_FUSION=1
-export AITER_QUICK_REDUCE_CAST_BF16_TO_FP16=0
+export ATOM_FORCE_ATTN_TRITON=1
 export ATOM_HOST_IP=${DECODE_IP}
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
-
-rm -rf /root/.cache/atom/* 2>/dev/null || true
 
 python3 -m atom.entrypoints.openai_server \
     --model "${MODEL_PATH}" \
@@ -195,18 +184,22 @@ python3 -m atom.entrypoints.openai_server \
     -tp "${DECODE_TP}" \
     --enable-dp-attention \
     --gpu-memory-utilization "${MEM_FRACTION}" \
-    --block-size "${BLOCK_SIZE}" \
+    --kv_cache_dtype fp8 --block-size "${BLOCK_SIZE}" \
     --max-model-len "${MAX_MODEL_LEN}" \
     --max-num-seqs "${DECODE_MAX_NUM_SEQS}" \
     --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}" \
+    --online_quant_config '{"global_quant_config": "ptpc_fp8", "exclude_layer": ["lm_head", "model.embed_tokens", "vision_tower", "multi_modal_projector", "patch_merge_mlp", "*.gate.*", "*.block_sparse_moe.experts*"]}' \
+    ${HF_OVERRIDE_STR} \
     --kv-transfer-config '{"kv_role":"kv_consumer","kv_connector":"mooncake","proxy_ip":"${DECODE_IP}","handshake_port":${HANDSHAKE_PORT}}' \
-    --cudagraph-capture-sizes "[1,2,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128,132,136,140,144,148,152,156,160,164,168,172,176,180,184,188,192,196,200,204,208,212,216,220,224,228,232,236,240,244,248,252,256,260,264,268,272,276,280,284,288,292,296,300,304,308,312,316,320,324,328,332,336,340,344,348,352,356,360,364,368,372,376,380,384,388,392,396,400,404,408,412,416,420,424,428,432,436,440,444,448,452,456,460,464,468,472,476,480,484,488,492,496,500,504,508,512,516,520,524,528,532,536,540,544,548,552,556,560,564,568,572,576,580,584,588,592,596,600,604,608,612,616,620,624,628,632,636,640,644,648,652,656,660,664,668,672,676,680,684,688,692,696,700,704,708,712,716,720,724,728,732,736,740,744,748,752,756,760,764,768,772,776,780,784,788,792,796,800,804,808,812,816,820,824,828,832,836,840,844,848,852,856,860,864,868,872,876,880,884,888,892,896,900,904,908,912,916,920,924,928,932,936,940,944,948,952,956,960,964,968,972,976,980,984,988,992,996,1000,1004,1008,1012,1016,1020,1024]" \
+    --cudagraph-capture-sizes "[1,8,16,24,32,40,48,56,64,72,80,88,96,104,112,120,128,136,144,152,160,168,176,184,192,200,208,216,224,232,240,248,256]" \
     --no-enable_prefix_caching \
     ${EXTRA_SERVER_ARGS} \
     2>&1 | tee /workspace/logs/decode.log
-DECODE_EOF
+DECODE_SCRIPT
 
-cat > "${LOG_ROOT}/scripts/router.sh" <<'ROUTER_EOF'
+# ── router script ───────────────────────────────────────────────────────────────
+
+cat > "${LOG_ROOT}/scripts/router.sh" << 'ROUTER_SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -214,8 +207,6 @@ echo "[router] prefill-1=${PREFILL_IP_1}:${PREFILL_PORT}"
 echo "[router] prefill-2=${PREFILL_IP_2}:${PREFILL_PORT}"
 echo "[router] decode=${DECODE_IP}:${DECODE_PORT}"
 echo "[router] router=0.0.0.0:${ROUTER_PORT}"
-
-mkdir -p /workspace/logs
 
 /usr/local/bin/atomesh launch \
     --host 0.0.0.0 --port "${ROUTER_PORT}" \
@@ -231,151 +222,107 @@ mkdir -p /workspace/logs
     --disable-circuit-breaker \
     --prometheus-port 29100 \
     2>&1 | tee /workspace/logs/router.log
-ROUTER_EOF
+ROUTER_SCRIPT
 
-cat > "${LOG_ROOT}/scripts/gsm8k.sh" <<'GSM8K_EOF'
+# ── gsm8k script ───────────────────────────────────────────────────────────────
+
+cat > "${LOG_ROOT}/scripts/gsm8k.sh" << 'GSM8K_SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
 
-RESULT_DIR="/workspace/gsm8k_results"
-
-echo "[gsm8k] model=${MODEL_PATH} endpoint=http://127.0.0.1:${ROUTER_PORT}"
-echo "[gsm8k] limit=${GSM8K_LIMIT:-all} fewshot=${GSM8K_NUM_FEWSHOT} concurrent=${GSM8K_NUM_CONCURRENT} batch_size=${GSM8K_BATCH_SIZE} max_gen_toks=${GSM8K_MAX_GEN_TOKS}"
-
-if ! command -v lm_eval >/dev/null 2>&1; then
-    echo "[gsm8k] installing lm-eval..."
-    pip install 'lm-eval[api]'
-fi
-
-mkdir -p "${RESULT_DIR}"
-
-LIMIT_ARG=""
-if [[ -n "${GSM8K_LIMIT}" ]]; then
-    LIMIT_ARG="--limit ${GSM8K_LIMIT}"
-fi
-
-IFS=',' read -ra GSM8K_CONCS <<< "${GSM8K_NUM_CONCURRENT}"
-for GSM8K_CONC in "${GSM8K_CONCS[@]}"; do
-    RUN_TAG="$(date +%Y%m%d%H%M%S)_gsm8k_minimax_m3_2p1d_dpa_c${GSM8K_CONC}"
+IFS=',' read -ra CONC_ARRAY <<< "${GSM8K_NUM_CONCURRENT}"
+for GSM8K_CONC in "${CONC_ARRAY[@]}"; do
+    RUN_TAG="gsm8k_minimax_m3_fp8_2p1d_tp4_dpa_c${GSM8K_CONC}"
     echo ""
-    echo "========================================="
-    echo "[gsm8k] running with concurrent=${GSM8K_CONC}"
-    echo "========================================="
+    echo "=== GSM8K run: ${RUN_TAG} ==="
 
-    lm_eval --model local-chat-completions \
-        --model_args "model=${MODEL_PATH},base_url=http://127.0.0.1:${ROUTER_PORT}/v1/chat/completions,num_concurrent=${GSM8K_CONC},max_retries=3,max_gen_toks=${GSM8K_MAX_GEN_TOKS}" \
+    LIMIT_ARGS=""
+    if [[ -n "${GSM8K_LIMIT}" ]]; then
+        LIMIT_ARGS="--limit ${GSM8K_LIMIT}"
+    fi
+
+    lm_eval --model local-completions \
+        --model_args "model=${MODEL_PATH},base_url=http://${PREFILL_IP_1}:${ROUTER_PORT}/v1/completions,num_concurrent=${GSM8K_CONC},max_retries=6,tokenized_requests=False" \
         --tasks gsm8k \
         --num_fewshot "${GSM8K_NUM_FEWSHOT}" \
         --batch_size "${GSM8K_BATCH_SIZE}" \
-        --apply_chat_template \
-        --fewshot_as_multiturn \
-        ${LIMIT_ARG} \
-        --output_path "${RESULT_DIR}/${RUN_TAG}"
-
-    python3 -c "
-from pathlib import Path
-import json
-
-result_dir = Path('${RESULT_DIR}/${RUN_TAG}')
-json_files = list(result_dir.rglob('*.json')) if result_dir.is_dir() else []
-if not json_files:
-    print('[gsm8k] ERROR: no result JSON found')
-    exit(1)
-
-result_file = max(json_files, key=lambda p: p.stat().st_mtime)
-data = json.load(open(result_file))
-score = data.get('results', {}).get('gsm8k', {}).get('exact_match,flexible-extract', 'N/A')
-print('=========================================')
-print(f'[gsm8k] concurrent=${GSM8K_CONC} exact_match,flexible-extract = {score}')
-print('=========================================')
-print(json.dumps(data.get('results', {}), indent=2))
-"
+        --gen_kwargs "max_gen_toks=${GSM8K_MAX_GEN_TOKS}" \
+        ${LIMIT_ARGS} \
+        --output_path "/workspace/gsm8k_results/${RUN_TAG}" \
+        --log_samples \
+        2>&1 | tee "/workspace/gsm8k_results/${RUN_TAG}.log"
 done
+GSM8K_SCRIPT
 
-echo "[gsm8k] all runs done, results saved to ${RESULT_DIR}"
-GSM8K_EOF
+# ── benchmark script ────────────────────────────────────────────────────────────
 
-cat > "${LOG_ROOT}/scripts/benchmark.sh" <<'BENCH_EOF'
+cat > "${LOG_ROOT}/scripts/benchmark.sh" << 'BENCH_SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
 
-RESULT_DIR="/workspace/benchmark_results"
+IFS=',' read -ra ISL_ARRAY <<< "${ISL_LIST}"
+IFS=',' read -ra CONC_ARRAY <<< "${CONC_LIST}"
 
-echo "[bench] model=${MODEL_PATH} endpoint=http://127.0.0.1:${ROUTER_PORT}"
-echo "[bench] ISL=[${ISL_LIST}] OSL=${OSL} CONC=[${CONC_LIST}] ratio=${RANDOM_RANGE_RATIO}"
-
-if [[ ! -d /tmp/sglang-benchmark/bench_serving ]]; then
-    rm -rf /tmp/sglang-benchmark
-    mkdir -p /tmp/sglang-benchmark
-    git clone --depth 1 https://github.com/kimbochen/bench_serving.git /tmp/sglang-benchmark/bench_serving
-fi
-
-mkdir -p "${RESULT_DIR}"
-
-IFS=',' read -ra ISLS <<< "${ISL_LIST}"
-IFS=',' read -ra CONCS <<< "${CONC_LIST}"
-
-for ISL in "${ISLS[@]}"; do
-    for CONC in "${CONCS[@]}"; do
-        RESULT_FILENAME="pd-atom-minimax-m3-2p1d-dpa-${ISL}-${OSL}-${CONC}-${RANDOM_RANGE_RATIO}"
+for ISL in "${ISL_ARRAY[@]}"; do
+    for CONC in "${CONC_ARRAY[@]}"; do
+        RESULT_FILENAME="pd-atom-minimax-m3-fp8-2p1d-tp4-dpa-${ISL}-${OSL}-${CONC}-${RANDOM_RANGE_RATIO}"
         echo ""
-        echo "========================================="
-        echo "[bench] ISL=${ISL} OSL=${OSL} CONC=${CONC}"
-        echo "========================================="
+        echo "=== bench ISL=${ISL} OSL=${OSL} CONC=${CONC} => ${RESULT_FILENAME} ==="
 
-        PYTHONDONTWRITEBYTECODE=1 python /tmp/sglang-benchmark/bench_serving/benchmark_serving.py \
-            --model="${MODEL_PATH}" \
-            --backend=vllm \
-            --base-url="http://127.0.0.1:${ROUTER_PORT}" \
-            --dataset-name=random \
-            --random-input-len="${ISL}" \
-            --random-output-len="${OSL}" \
+        python3 /workspace/benchmarks/benchmark_serving.py \
+            --backend atom \
+            --base-url "http://${PREFILL_IP_1}:${ROUTER_PORT}" \
+            --endpoint /v1/completions \
+            --model "${MODEL_PATH}" \
+            --dataset-name random \
+            --random-input-len "${ISL}" \
+            --random-output-len "${OSL}" \
             --random-range-ratio "${RANDOM_RANGE_RATIO}" \
-            --num-prompts=$(( CONC * 10 )) \
-            --max-concurrency="${CONC}" \
-            --trust-remote-code \
-            --num-warmups=$(( 2 * CONC )) \
-            --request-rate=inf \
-            --ignore-eos \
-            --save-result \
-            --percentile-metrics='ttft,tpot,itl,e2el' \
-            --result-dir="${RESULT_DIR}" \
-            --result-filename="${RESULT_FILENAME}.json"
+            --num-prompts "${CONC}" \
+            --max-concurrency "${CONC}" \
+            --result-dir /workspace/benchmark_results \
+            --result-filename "${RESULT_FILENAME}" \
+            2>&1 | tee "/workspace/benchmark_results/${RESULT_FILENAME}.log"
     done
 done
 
 echo ""
-echo "========================================="
-echo "[bench] summary"
-echo "========================================="
-
+echo "=== summary ==="
 python3 -c "
-from pathlib import Path
-import json
-
-result_dir = Path('${RESULT_DIR}')
-json_files = sorted(result_dir.glob('pd-atom-minimax-m3-2p1d-dpa-*.json'))
-if not json_files:
-    print('No result files found')
-    exit(0)
-
-print(f\"{'Config':<25} {'TTFT(ms)':>10} {'ITL(ms)':>10} {'Throughput(tok/s)':>18}\")
-print('-' * 65)
-for f in json_files:
-    d = json.load(open(f))
-    isl = d.get('random_input_len', '?')
-    osl = d.get('random_output_len', '?')
-    conc = d.get('max_concurrency', '?')
-    ttft = d.get('mean_ttft_ms', 0)
-    itl = d.get('mean_itl_ms', 0)
-    tp = d.get('output_throughput', 0)
-    print(f'{isl}/{osl} c={conc:<6} {ttft:>10.1f} {itl:>10.2f} {tp:>18.1f}')
+import json, glob, os
+files = sorted(glob.glob('/workspace/benchmark_results/pd-atom-minimax-m3-fp8-2p1d-tp4-dpa-*.json'))
+if not files:
+    print('no result files found')
+else:
+    header = f'{\"ISL\":>6} {\"OSL\":>6} {\"CONC\":>6} {\"Tput(tok/s)\":>12} {\"TTFT_avg\":>10} {\"TTFT_p99\":>10} {\"TPOT_avg\":>10} {\"TPOT_p99\":>10} {\"ITL_avg\":>10} {\"ITL_p99\":>10}'
+    print(header)
+    print('-' * len(header))
+    for f in files:
+        with open(f) as fh:
+            d = json.load(fh)
+        isl = d.get('random_input_len', '?')
+        osl = d.get('random_output_len', '?')
+        conc = d.get('max_concurrency', d.get('num_prompts', '?'))
+        tput = d.get('output_throughput', 0)
+        ttft_avg = d.get('mean_ttft_ms', 0)
+        ttft_p99 = d.get('p99_ttft_ms', 0)
+        tpot_avg = d.get('mean_tpot_ms', 0)
+        tpot_p99 = d.get('p99_tpot_ms', 0)
+        itl_avg  = d.get('mean_itl_ms', 0)
+        itl_p99  = d.get('p99_itl_ms', 0)
+        print(f'{isl:>6} {osl:>6} {conc:>6} {tput:>12.1f} {ttft_avg:>10.1f} {ttft_p99:>10.1f} {tpot_avg:>10.1f} {tpot_p99:>10.1f} {itl_avg:>10.1f} {itl_p99:>10.1f}')
 "
+BENCH_SCRIPT
 
-echo "[bench] results saved to ${RESULT_DIR}"
-BENCH_EOF
+# ── chmod + variable substitution ──────────────────────────────────────────────
 
 chmod +x "${LOG_ROOT}"/scripts/*.sh
+
+if [[ ${#HF_OVERRIDE_ARGS[@]} -gt 0 ]]; then
+    HF_OVERRIDE_STR="${HF_OVERRIDE_ARGS[*]}"
+else
+    HF_OVERRIDE_STR=""
+fi
 
 for script in "${LOG_ROOT}"/scripts/*.sh; do
     sed -i \
@@ -398,6 +345,7 @@ for script in "${LOG_ROOT}"/scripts/*.sh; do
         -e "s|\${PREFILL_GPU_IDS}|${PREFILL_GPU_IDS}|g" \
         -e "s|\${DECODE_GPU_IDS}|${DECODE_GPU_IDS}|g" \
         -e "s|\${EXTRA_SERVER_ARGS}|${EXTRA_SERVER_ARGS}|g" \
+        -e "s|\${HF_OVERRIDE_STR}|${HF_OVERRIDE_STR}|g" \
         -e "s|\${ISL_LIST}|${ISL_LIST}|g" \
         -e "s|\${OSL}|${OSL}|g" \
         -e "s|\${CONC_LIST}|${CONC_LIST}|g" \
@@ -410,29 +358,22 @@ for script in "${LOG_ROOT}"/scripts/*.sh; do
         "$script"
 done
 
-echo "[scripts] generated under ${LOG_ROOT}/scripts/"
-ls -la "${LOG_ROOT}"/scripts/
+# ── cleanup trap ────────────────────────────────────────────────────────────────
 
-# ======================== cleanup trap ========================
 cleanup() {
-    local rc=$?
     echo ""
-    echo "=== cleanup (rc=${rc}) at $(date -Is) ==="
+    echo "=== cleanup: removing containers ==="
     for node in "${ALL_NODES[@]}"; do
-        srun --nodelist="$node" --nodes=1 --ntasks=1 --time=00:01:00 bash -c "
-            docker logs '${CONTAINER}' > '${LOG_ROOT}/docker_\$(hostname).log' 2>&1 || true
-            docker rm -f '${CONTAINER}' >/dev/null 2>&1 || true
-            pkill -9 -f 'atom.entrypoints.openai_server' 2>/dev/null || true
-            pkill -9 -f 'atomesh' 2>/dev/null || true
+        srun --nodelist="$node" --nodes=1 --ntasks=1 bash -lc "
+            docker rm -f '${CONTAINER}' 2>/dev/null || true
         " &
     done
     wait
-    echo "=== cleanup done; logs under ${LOG_ROOT} ==="
+    echo "=== cleanup done ==="
 }
 trap cleanup EXIT
-trap 'echo "=== received signal, cleaning up ==="; exit 130' INT TERM
 
-# ======================== helper ========================
+# ── helper functions ────────────────────────────────────────────────────────────
 
 detect_nic_type() {
     if [[ -n "${MORI_NIC_TYPE:-}" ]]; then
@@ -625,12 +566,14 @@ except Exception:
     "
 }
 
-# ======================== 1. start containers ========================
+# ── step 1: launch containers ──────────────────────────────────────────────────
+
 launch_container "$PREFILL_NODE_1"  prefill_1
 launch_container "$PREFILL_NODE_2"  prefill_2
 launch_container "$DECODE_NODE"     decode
 
-# ======================== 2. start prefill servers (detached) ========================
+# ── step 2: launch prefill servers ──────────────────────────────────────────────
+
 echo "[prefill-1] launching server on ${PREFILL_NODE_1}"
 srun --nodelist="$PREFILL_NODE_1" --nodes=1 --ntasks=1 bash -lc "
     docker exec -d '${CONTAINER}' bash '${LOG_ROOT}/scripts/prefill_1.sh'
@@ -640,13 +583,15 @@ srun --nodelist="$PREFILL_NODE_2" --nodes=1 --ntasks=1 bash -lc "
     docker exec -d '${CONTAINER}' bash '${LOG_ROOT}/scripts/prefill_2.sh'
 "
 
-# ======================== 3. start decode server (detached) ========================
+# ── step 3: launch decode server ───────────────────────────────────────────────
+
 echo "[decode] launching server on ${DECODE_NODE}"
 srun --nodelist="$DECODE_NODE" --nodes=1 --ntasks=1 bash -lc "
     docker exec -d '${CONTAINER}' bash '${LOG_ROOT}/scripts/decode.sh'
 "
 
-# ======================== 4. wait for servers ========================
+# ── step 4: wait for all servers ───────────────────────────────────────────────
+
 wait_endpoint "$PREFILL_NODE_1" "http://${PREFILL_IP_1}:${PREFILL_PORT}/health" \
     "$WAIT_SERVER_TIMEOUT" "prefill-1-http"
 wait_endpoint "$PREFILL_NODE_2" "http://${PREFILL_IP_2}:${PREFILL_PORT}/health" \
@@ -654,7 +599,8 @@ wait_endpoint "$PREFILL_NODE_2" "http://${PREFILL_IP_2}:${PREFILL_PORT}/health" 
 wait_endpoint "$DECODE_NODE"    "http://${DECODE_IP}:${DECODE_PORT}/health" \
     "$WAIT_SERVER_TIMEOUT" "decode-http"
 
-# ======================== 5. start router (detached) ========================
+# ── step 5: launch router ──────────────────────────────────────────────────────
+
 echo "[router] launching on ${PREFILL_NODE_1}"
 srun --nodelist="$PREFILL_NODE_1" --nodes=1 --ntasks=1 bash -lc "
     docker exec -d '${CONTAINER}' bash '${LOG_ROOT}/scripts/router.sh'
@@ -666,7 +612,8 @@ wait_endpoint "$PREFILL_NODE_1" "http://${PREFILL_IP_1}:${ROUTER_PORT}/v1/models
 wait_inference_ready "$PREFILL_NODE_1" "http://${PREFILL_IP_1}:${ROUTER_PORT}" \
     "$MODEL_PATH" "$WAIT_SERVER_TIMEOUT" "router-pipeline"
 
-# ======================== 6. run gsm8k accuracy (foreground, optional) ========================
+# ── step 6: GSM8K (optional) ───────────────────────────────────────────────────
+
 if [[ "${RUN_GSM8K}" == "1" ]]; then
     echo ""
     echo "=== running GSM8K accuracy eval on ${PREFILL_NODE_1} ==="
@@ -677,7 +624,8 @@ else
     echo "=== skipping GSM8K (RUN_GSM8K=${RUN_GSM8K}) ==="
 fi
 
-# ======================== 7. run benchmark (foreground) ========================
+# ── step 7: benchmark ──────────────────────────────────────────────────────────
+
 echo ""
 echo "=== running benchmark on ${PREFILL_NODE_1} ==="
 srun --nodelist="$PREFILL_NODE_1" --nodes=1 --ntasks=1 bash -lc "

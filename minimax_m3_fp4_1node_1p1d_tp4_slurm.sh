@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=minimax-m3-1node-1p1d-tp4
+#SBATCH --job-name=minimax-m3-fp4-1node-1p1d-tp4
 #SBATCH --account=amd-frameworks
 #SBATCH --partition=amd-frameworks
 #SBATCH --nodes=1
@@ -9,26 +9,24 @@
 #SBATCH --gres=gpu:8
 #SBATCH --exclusive
 #SBATCH --time=04:00:00
-#SBATCH --nodelist=mia1-p02-g47
-#SBATCH --output=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_1node_1p1d_tp4-%j.out
-#SBATCH --error=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_1node_1p1d_tp4-%j.err
+#SBATCH --output=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_fp4_1node_1p1d_tp4-%j.out
+#SBATCH --error=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_fp4_1node_1p1d_tp4-%j.err
 #
 # Single-node 1P+1D PD-disaggregated benchmark for MiniMax-M3-MXFP4 on ATOM.
 #   prefill: GPU 0-3 (TP=4, port 8010)
 #   decode:  GPU 4-7 (TP=4, port 8020)
 #   router:  port 8000
-#   All on the same node (g47).
 #
 # Usage:
 #   mkdir -p /it-share/yajizhan/slurm_minimax_logs
-#   sbatch minimax_m3_1node_1p_tp4_1d_tp4_atom_tp_slurm.sh
+#   sbatch minimax_m3_fp4_1node_1p1d_tp4_slurm.sh
 
 set -euo pipefail
 
 # ======================== configuration ========================
 MODEL_PATH="${MODEL_PATH:-/mnt/models/MiniMax-M3-MXFP4}"
-DOCKER_IMAGE="${DOCKER_IMAGE:-rocm/atom-dev:MiniMax-M3-20260624}"
-CONTAINER="${CONTAINER:-atom_mesh_minimax_m3_1node_1p1d_tp4_${SLURM_JOB_ID}}"
+DOCKER_IMAGE="${DOCKER_IMAGE:-rocm/atom-dev:MiniMax-M3-20260630}"
+CONTAINER="${CONTAINER:-atom_mesh_minimax_m3_fp4_1node_1p1d_tp4_${SLURM_JOB_ID}}"
 
 PREFILL_TP="${PREFILL_TP:-4}"
 DECODE_TP="${DECODE_TP:-4}"
@@ -43,13 +41,12 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-256}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-32768}"
 EXTRA_SERVER_ARGS="${EXTRA_SERVER_ARGS:-}"
-# KV cache dtype. Empty (default) = no flag = known-good accuracy (~94% GSM8K).
-# Set KV_CACHE_DTYPE=fp8 to reproduce the accuracy-breaking config (~2% GSM8K).
-KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-}"
-if [[ -n "${KV_CACHE_DTYPE}" ]]; then
-    KV_CACHE_DTYPE_ARG="--kv_cache_dtype ${KV_CACHE_DTYPE}"
-else
-    KV_CACHE_DTYPE_ARG=""
+
+DEFAULT_HF_OVERRIDES='{"use_index_cache": true, "index_topk_freq": 4}'
+HF_OVERRIDES="${HF_OVERRIDES:-${DEFAULT_HF_OVERRIDES}}"
+HF_OVERRIDE_ARGS=()
+if [[ -n "${HF_OVERRIDES}" ]]; then
+    HF_OVERRIDE_ARGS=(--hf-overrides "${HF_OVERRIDES}")
 fi
 
 ISL_LIST="${ISL_LIST:-8192}"
@@ -63,11 +60,11 @@ WAIT_ROUTER_TIMEOUT="${WAIT_ROUTER_TIMEOUT:-300}"
 RUN_GSM8K="${RUN_GSM8K:-1}"
 GSM8K_LIMIT="${GSM8K_LIMIT:-}"
 GSM8K_NUM_FEWSHOT="${GSM8K_NUM_FEWSHOT:-5}"
-GSM8K_NUM_CONCURRENT="${GSM8K_NUM_CONCURRENT:-32}"
+GSM8K_NUM_CONCURRENT="${GSM8K_NUM_CONCURRENT:-64,256}"
 GSM8K_BATCH_SIZE="${GSM8K_BATCH_SIZE:-65}"
 GSM8K_MAX_GEN_TOKS="${GSM8K_MAX_GEN_TOKS:-16384}"
 
-LOG_ROOT="${LOG_ROOT:-/it-share/yajizhan/slurm_minimax_logs/$(date +%m%d)_minimax_m3_1node_1p1d_tp4_${SLURM_JOB_ID}}"
+LOG_ROOT="${LOG_ROOT:-/it-share/yajizhan/slurm_minimax_logs/$(date +%m%d)_minimax_m3_fp4_1node_1p1d_tp4_${SLURM_JOB_ID}}"
 
 # ======================== pre-flight ========================
 echo "=== Job ${SLURM_JOB_ID} starting on $(hostname) at $(date -Is) ==="
@@ -102,7 +99,7 @@ NODE_IP=$(srun --nodelist="$NODE" --nodes=1 --ntasks=1 \
     bash -c "ip route get 1.1.1.1 | awk '/src/ {print \$7; exit}'")
 
 cat <<INFO
-=== Configuration (single-node 1P+1D) ===
+=== Configuration (single-node 1P+1D FP4) ===
 NODE    : ${NODE} (IP=${NODE_IP})
 PREFILL : GPU 0-3 (TP=${PREFILL_TP}, port=${PREFILL_PORT})
 DECODE  : GPU 4-7 (TP=${DECODE_TP}, port=${DECODE_PORT})
@@ -120,31 +117,6 @@ INFO
 PREFILL_GPU_IDS="0,1,2,3"
 DECODE_GPU_IDS="4,5,6,7"
 
-cat > "${LOG_ROOT}/scripts/reinstall.sh" <<'REINSTALL_EOF'
-#!/usr/bin/env bash
-# Full reinstall of the host ATOM checkout into the container, ONCE (prefill and
-# decode share this container; this runs before either server starts). Copies the
-# source to a container-internal dir (no writes to the /it-share mount) and
-# pip install -e it so `import atom` resolves to the patched tree.
-set -euo pipefail
-REINSTALL_SRC=/opt/atom_reinstall
-rm -rf "${REINSTALL_SRC}"
-mkdir -p "${REINSTALL_SRC}"
-if command -v rsync >/dev/null 2>&1; then
-    rsync -a --exclude 'mesh/target' --exclude '.git' --exclude '__pycache__' --exclude '*.pyc' \
-        /it-share/yajizhan/code/ATOM/ "${REINSTALL_SRC}/"
-else
-    cp -a /it-share/yajizhan/code/ATOM/. "${REINSTALL_SRC}/"
-    rm -rf "${REINSTALL_SRC}/atom/mesh/target" "${REINSTALL_SRC}/.git"
-fi
-cd "${REINSTALL_SRC}"
-pip install -e . --no-deps -q
-python3 -c "import atom; assert atom.__file__.startswith('${REINSTALL_SRC}'), 'atom NOT from reinstall: '+atom.__file__; print('[reinstall] atom at', atom.__file__)"
-grep -q "_add_region(index_cache\[sparse_idx\])" "${REINSTALL_SRC}/atom/model_ops/attentions/aiter_attention.py" \
-    && echo "[reinstall] OK: sparse index_cache fix present" \
-    || { echo "[reinstall] FAIL: fix line missing"; exit 1; }
-REINSTALL_EOF
-
 cat > "${LOG_ROOT}/scripts/prefill.sh" <<'PREFILL_EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -155,12 +127,9 @@ mkdir -p /workspace/logs
 
 export HIP_VISIBLE_DEVICES=${PREFILL_GPU_IDS}
 export PYTHONUNBUFFERED=1
-export AITER_LOG_LEVEL=WARNING
 export HSA_NO_SCRATCH_RECLAIM=1
-export ATOM_FORCE_ATTN_TRITON=1
 export AITER_QUICK_REDUCE_QUANTIZATION=INT4
-export ATOM_ENABLE_ALLREDUCE_RMSNORM_FUSION=1
-export AITER_QUICK_REDUCE_CAST_BF16_TO_FP16=0
+export ATOM_FORCE_ATTN_TRITON=1
 export ATOM_HOST_IP=${NODE_IP}
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 
@@ -171,14 +140,15 @@ python3 -m atom.entrypoints.openai_server \
     --host 0.0.0.0 --server-port "${PREFILL_PORT}" \
     --trust-remote-code \
     --tensor-parallel-size "${PREFILL_TP}" \
-    ${KV_CACHE_DTYPE_ARG} \
-    --gpu-memory-utilization "${MEM_FRACTION}" \
+    --kv_cache_dtype fp8 \
     --block-size "${BLOCK_SIZE}" \
+    --gpu-memory-utilization "${MEM_FRACTION}" \
     --max-model-len "${MAX_MODEL_LEN}" \
     --max-num-seqs "${MAX_NUM_SEQS}" \
     --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}" \
     --kv-transfer-config '{"kv_role":"kv_producer","kv_connector":"mooncake","proxy_ip":"${NODE_IP}","handshake_port":${HANDSHAKE_PORT}}' \
     --no-enable_prefix_caching \
+    ${HF_OVERRIDE_ARGS} \
     ${EXTRA_SERVER_ARGS} \
     2>&1 | tee /workspace/logs/prefill.log
 PREFILL_EOF
@@ -193,12 +163,9 @@ mkdir -p /workspace/logs
 
 export HIP_VISIBLE_DEVICES=${DECODE_GPU_IDS}
 export PYTHONUNBUFFERED=1
-export AITER_LOG_LEVEL=WARNING
 export HSA_NO_SCRATCH_RECLAIM=1
-export ATOM_FORCE_ATTN_TRITON=1
 export AITER_QUICK_REDUCE_QUANTIZATION=INT4
-export ATOM_ENABLE_ALLREDUCE_RMSNORM_FUSION=1
-export AITER_QUICK_REDUCE_CAST_BF16_TO_FP16=0
+export ATOM_FORCE_ATTN_TRITON=1
 export ATOM_HOST_IP=${NODE_IP}
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 
@@ -209,15 +176,16 @@ python3 -m atom.entrypoints.openai_server \
     --host 0.0.0.0 --server-port "${DECODE_PORT}" \
     --trust-remote-code \
     --tensor-parallel-size "${DECODE_TP}" \
-    ${KV_CACHE_DTYPE_ARG} \
-    --gpu-memory-utilization "${MEM_FRACTION}" \
+    --kv_cache_dtype fp8 \
     --block-size "${BLOCK_SIZE}" \
+    --gpu-memory-utilization "${MEM_FRACTION}" \
     --max-model-len "${MAX_MODEL_LEN}" \
     --max-num-seqs "${MAX_NUM_SEQS}" \
     --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}" \
     --kv-transfer-config '{"kv_role":"kv_consumer","kv_connector":"mooncake","proxy_ip":"${NODE_IP}","handshake_port":${HANDSHAKE_PORT}}' \
-    --cudagraph-capture-sizes "[1,2,4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128,132,136,140,144,148,152,156,160,164,168,172,176,180,184,188,192,196,200,204,208,212,216,220,224,228,232,236,240,244,248,252,256]" \
+    --cudagraph-capture-sizes "[1,8,16,24,32,40,48,56,64,72,80,88,96,104,112,120,128,136,144,152,160,168,176,184,192,200,208,216,224,232,240,248,256]" \
     --no-enable_prefix_caching \
+    ${HF_OVERRIDE_ARGS} \
     ${EXTRA_SERVER_ARGS} \
     2>&1 | tee /workspace/logs/decode.log
 DECODE_EOF
@@ -268,20 +236,19 @@ fi
 
 IFS=',' read -ra GSM8K_CONCS <<< "${GSM8K_NUM_CONCURRENT}"
 for GSM8K_CONC in "${GSM8K_CONCS[@]}"; do
-    RUN_TAG="$(date +%Y%m%d%H%M%S)_gsm8k_minimax_m3_1node_1p1d_tp4_c${GSM8K_CONC}"
+    RUN_TAG="$(date +%Y%m%d%H%M%S)_gsm8k_minimax_m3_fp4_1node_1p1d_tp4_c${GSM8K_CONC}"
     echo ""
     echo "========================================="
     echo "[gsm8k] running with concurrent=${GSM8K_CONC}"
     echo "========================================="
 
     lm_eval --model local-chat-completions \
-        --model_args "model=${MODEL_PATH},base_url=http://127.0.0.1:${ROUTER_PORT}/v1/chat/completions,api_key=EMPTY,eos_string=</s>,max_retries=5,num_concurrent=${GSM8K_CONC},timeout=1800,tokenized_requests=False,max_length=32768" \
+        --model_args "model=${MODEL_PATH},base_url=http://127.0.0.1:${ROUTER_PORT}/v1/chat/completions,num_concurrent=${GSM8K_CONC},max_retries=3,max_gen_toks=${GSM8K_MAX_GEN_TOKS}" \
         --tasks gsm8k \
         --num_fewshot "${GSM8K_NUM_FEWSHOT}" \
+        --batch_size "${GSM8K_BATCH_SIZE}" \
         --apply_chat_template \
         --fewshot_as_multiturn \
-        --log_samples \
-        --gen_kwargs "max_tokens=${GSM8K_MAX_GEN_TOKS},temperature=0,top_p=1" \
         ${LIMIT_ARG} \
         --output_path "${RESULT_DIR}/${RUN_TAG}"
 
@@ -330,7 +297,7 @@ IFS=',' read -ra CONCS <<< "${CONC_LIST}"
 
 for ISL in "${ISLS[@]}"; do
     for CONC in "${CONCS[@]}"; do
-        RESULT_FILENAME="pd-atom-minimax-m3-1node-1p1d-tp4-${ISL}-${OSL}-${CONC}-${RANDOM_RANGE_RATIO}"
+        RESULT_FILENAME="pd-atom-minimax-m3-fp4-1node-1p1d-tp4-${ISL}-${OSL}-${CONC}-${RANDOM_RANGE_RATIO}"
         echo ""
         echo "========================================="
         echo "[bench] ISL=${ISL} OSL=${OSL} CONC=${CONC}"
@@ -367,7 +334,7 @@ from pathlib import Path
 import json
 
 result_dir = Path('${RESULT_DIR}')
-json_files = sorted(result_dir.glob('pd-atom-minimax-m3-1node-1p1d-tp4-*.json'))
+json_files = sorted(result_dir.glob('pd-atom-minimax-m3-fp4-1node-1p1d-tp4-*.json'))
 if not json_files:
     print('No result files found')
     exit(0)
@@ -408,7 +375,7 @@ for script in "${LOG_ROOT}"/scripts/*.sh; do
         -e "s|\${PREFILL_GPU_IDS}|${PREFILL_GPU_IDS}|g" \
         -e "s|\${DECODE_GPU_IDS}|${DECODE_GPU_IDS}|g" \
         -e "s|\${EXTRA_SERVER_ARGS}|${EXTRA_SERVER_ARGS}|g" \
-        -e "s|\${KV_CACHE_DTYPE_ARG}|${KV_CACHE_DTYPE_ARG}|g" \
+        -e "s|\${HF_OVERRIDE_ARGS}|${HF_OVERRIDE_ARGS[*]}|g" \
         -e "s|\${ISL_LIST}|${ISL_LIST}|g" \
         -e "s|\${OSL}|${OSL}|g" \
         -e "s|\${CONC_LIST}|${CONC_LIST}|g" \
@@ -503,18 +470,12 @@ nic_mount_flags() {
                 flags+=(-v "$host_ibverbs:/lib/x86_64-linux-gnu/libibverbs.so.1")
             fi
             for lib in /usr/local/lib/libbnxt_re-rdmav*.so; do
-                if [[ -f "$lib" ]]; then
-                    flags+=(-v "$lib:/usr/lib/x86_64-linux-gnu/libibverbs/$(basename "$lib")")
-                fi
+                [[ -f "$lib" ]] && flags+=(-v "$lib:/usr/lib/x86_64-linux-gnu/libibverbs/$(basename "$lib")")
             done
             for lib in /usr/local/lib/libbnxt_re.so; do
-                if [[ -f "$lib" ]]; then
-                    flags+=(-v "$lib:/usr/lib/x86_64-linux-gnu/$(basename "$lib")")
-                fi
+                [[ -f "$lib" ]] && flags+=(-v "$lib:/usr/lib/x86_64-linux-gnu/$(basename "$lib")")
             done
-            if [[ -d /etc/libibverbs.d ]]; then
-                flags+=(-v /etc/libibverbs.d:/etc/libibverbs.d:ro)
-            fi
+            [[ -d /etc/libibverbs.d ]] && flags+=(-v /etc/libibverbs.d:/etc/libibverbs.d:ro)
             ;;
         ionic)
             local host_ibverbs
@@ -526,11 +487,8 @@ nic_mount_flags() {
             for dir in "${ionic_dirs[@]}"; do
                 for lib in "$dir"/libionic*.so; do
                     if [[ -f "$lib" ]]; then
-                        local real
-                        real=$(readlink -f "$lib")
-                        if [[ -f "$real" ]]; then
-                            flags+=(-v "$real:$real")
-                        fi
+                        local real; real=$(readlink -f "$lib")
+                        [[ -f "$real" ]] && flags+=(-v "$real:$real")
                         flags+=(-v "$lib:/usr/lib/x86_64-linux-gnu/$(basename "$lib")")
                     fi
                 done
@@ -538,17 +496,12 @@ nic_mount_flags() {
             local provider_dir=/usr/lib/x86_64-linux-gnu/libibverbs
             if [[ -d "$provider_dir" ]]; then
                 for lib in "$provider_dir"/libionic-rdmav*.so; do
-                    if [[ -f "$lib" ]]; then
-                        flags+=(-v "$lib:$lib")
-                    fi
+                    [[ -f "$lib" ]] && flags+=(-v "$lib:$lib")
                 done
             fi
-            if [[ -d /etc/libibverbs.d ]]; then
-                flags+=(-v /etc/libibverbs.d:/etc/libibverbs.d:ro)
-            fi
+            [[ -d /etc/libibverbs.d ]] && flags+=(-v /etc/libibverbs.d:/etc/libibverbs.d:ro)
             ;;
-        mlx5)
-            ;;
+        mlx5) ;;
     esac
     echo "${flags[@]}"
 }
@@ -595,12 +548,6 @@ srun --nodelist="$NODE" --nodes=1 --ntasks=1 bash -lc "
     '
     echo \"[docker] tuned TCP backlog on \$(hostname)\"
 "
-
-# ======================== 1b. reinstall host ATOM into container (once, blocking) ===
-echo "[reinstall] installing host ATOM into ${CONTAINER} (once, before servers)"
-srun --nodelist="$NODE" --nodes=1 --ntasks=1 bash -lc "
-    docker exec '${CONTAINER}' bash '${LOG_ROOT}/scripts/reinstall.sh'
-" || { echo "[reinstall] FAILED — aborting"; exit 1; }
 
 # ======================== 2. start prefill server (detached) ========================
 echo "[prefill] launching server on ${NODE} GPU 0-3"
