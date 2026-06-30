@@ -40,12 +40,6 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-256}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-32768}"
 EXTRA_SERVER_ARGS="${EXTRA_SERVER_ARGS:-}"
-DEFAULT_HF_OVERRIDES='{"use_index_cache": true, "index_topk_freq": 4}'
-HF_OVERRIDES="${HF_OVERRIDES:-${DEFAULT_HF_OVERRIDES}}"
-HF_OVERRIDE_ARGS=()
-if [[ -n "${HF_OVERRIDES}" ]]; then
-    HF_OVERRIDE_ARGS=(--hf-overrides "${HF_OVERRIDES}")
-fi
 
 
 ISL_LIST="${ISL_LIST:-8192}"
@@ -158,7 +152,7 @@ python3 -m atom.entrypoints.openai_server \
     --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}" \
     --kv-transfer-config '{"kv_role":"kv_producer","kv_connector":"mooncake","proxy_ip":"${PREFILL_IP}","handshake_port":${HANDSHAKE_PORT}}' \
     --no-enable_prefix_caching \
-    ${HF_OVERRIDE_ARGS} \
+    --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
     ${EXTRA_SERVER_ARGS} \
     2>&1 | tee /workspace/logs/prefill.log
 PREFILL_EOF
@@ -196,7 +190,7 @@ python3 -m atom.entrypoints.openai_server \
     --kv-transfer-config '{"kv_role":"kv_consumer","kv_connector":"mooncake","proxy_ip":"${DECODE_IP}","handshake_port":${HANDSHAKE_PORT}}' \
     --cudagraph-capture-sizes "[1,8,16,24,32,40,48,56,64,72,80,88,96,104,112,120,128,136,144,152,160,168,176,184,192,200,208,216,224,232,240,248,256]" \
     --no-enable_prefix_caching \
-    ${HF_OVERRIDE_ARGS} \
+    --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
     ${EXTRA_SERVER_ARGS} \
     2>&1 | tee /workspace/logs/decode.log
 DECODE_EOF
@@ -387,7 +381,6 @@ for script in "${LOG_ROOT}"/scripts/*.sh; do
         -e "s|\${PREFILL_GPU_IDS}|${PREFILL_GPU_IDS}|g" \
         -e "s|\${DECODE_GPU_IDS}|${DECODE_GPU_IDS}|g" \
         -e "s|\${EXTRA_SERVER_ARGS}|${EXTRA_SERVER_ARGS}|g" \
-        -e "s|\${HF_OVERRIDE_ARGS}|${HF_OVERRIDE_ARGS[*]}|g" \
         -e "s|\${ISL_LIST}|${ISL_LIST}|g" \
         -e "s|\${OSL}|${OSL}|g" \
         -e "s|\${CONC_LIST}|${CONC_LIST}|g" \

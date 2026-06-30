@@ -44,12 +44,6 @@ MAX_NUM_SEQS="${MAX_NUM_SEQS:-256}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-32768}"
 EXTRA_SERVER_ARGS="${EXTRA_SERVER_ARGS:-}"
 
-DEFAULT_HF_OVERRIDES='{"use_index_cache": true, "index_topk_freq": 4}'
-HF_OVERRIDES="${HF_OVERRIDES:-${DEFAULT_HF_OVERRIDES}}"
-HF_OVERRIDE_ARGS=()
-if [[ -n "${HF_OVERRIDES}" ]]; then
-    HF_OVERRIDE_ARGS=(--hf-overrides "${HF_OVERRIDES}")
-fi
 
 ISL_LIST="${ISL_LIST:-8192}"
 OSL="${OSL:-1024}"
@@ -155,7 +149,7 @@ python3 -m atom.entrypoints.openai_server \
     --method eagle3 \
     --draft-model "${DRAFT_MODEL_PATH}" \
     --num-speculative-tokens "${NUM_SPEC_TOKENS}" \
-    ${HF_OVERRIDE_ARGS} \
+    --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
     ${EXTRA_SERVER_ARGS} \
     2>&1 | tee /workspace/logs/prefill.log
 PREFILL_EOF
@@ -195,7 +189,7 @@ python3 -m atom.entrypoints.openai_server \
     --method eagle3 \
     --draft-model "${DRAFT_MODEL_PATH}" \
     --num-speculative-tokens "${NUM_SPEC_TOKENS}" \
-    ${HF_OVERRIDE_ARGS} \
+    --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
     ${EXTRA_SERVER_ARGS} \
     2>&1 | tee /workspace/logs/decode.log
 DECODE_EOF
@@ -387,7 +381,6 @@ for script in "${LOG_ROOT}"/scripts/*.sh; do
         -e "s|\${PREFILL_GPU_IDS}|${PREFILL_GPU_IDS}|g" \
         -e "s|\${DECODE_GPU_IDS}|${DECODE_GPU_IDS}|g" \
         -e "s|\${EXTRA_SERVER_ARGS}|${EXTRA_SERVER_ARGS}|g" \
-        -e "s|\${HF_OVERRIDE_ARGS}|${HF_OVERRIDE_ARGS[*]}|g" \
         -e "s|\${ISL_LIST}|${ISL_LIST}|g" \
         -e "s|\${OSL}|${OSL}|g" \
         -e "s|\${CONC_LIST}|${CONC_LIST}|g" \

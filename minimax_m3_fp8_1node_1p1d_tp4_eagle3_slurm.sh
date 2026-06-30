@@ -12,8 +12,7 @@
 #SBATCH --output=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_fp8_1node_1p1d_tp4_eagle3-%j.out
 #SBATCH --error=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_fp8_1node_1p1d_tp4_eagle3-%j.err
 #
-# Single-node 1P+1D PD-disaggregated benchmark for MiniMax-M3-MXFP4 with FP8
-# online quantization + EAGLE3 speculative decoding on ATOM.
+# Single-node 1P+1D PD-disaggregated benchmark for MiniMax-M3-MXFP4 FP8 + EAGLE3 on ATOM.
 #   prefill: GPU 0-3 (TP=4, port 8010)
 #   decode:  GPU 4-7 (TP=4, port 8020)
 #   router:  port 8000
@@ -45,12 +44,6 @@ MAX_NUM_SEQS="${MAX_NUM_SEQS:-256}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-32768}"
 EXTRA_SERVER_ARGS="${EXTRA_SERVER_ARGS:-}"
 
-DEFAULT_HF_OVERRIDES='{"use_index_cache": true, "index_topk_freq": 4}'
-HF_OVERRIDES="${HF_OVERRIDES:-${DEFAULT_HF_OVERRIDES}}"
-HF_OVERRIDE_ARGS=()
-if [[ -n "${HF_OVERRIDES}" ]]; then
-    HF_OVERRIDE_ARGS=(--hf-overrides "${HF_OVERRIDES}")
-fi
 
 ISL_LIST="${ISL_LIST:-8192}"
 OSL="${OSL:-1024}"
@@ -111,7 +104,7 @@ MODEL   : ${MODEL_PATH}
 DRAFT   : ${DRAFT_MODEL_PATH}
 SPEC_TOK: ${NUM_SPEC_TOKENS}
 IMAGE   : ${DOCKER_IMAGE}
-BACKEND : atom (PD mooncake KV transfer + EAGLE3, pure TP, single-node, FP8 online quant)
+BACKEND : atom (PD mooncake KV transfer, pure TP, single-node, EAGLE3)
 RUN_GSM8K  : ${RUN_GSM8K} (limit=${GSM8K_LIMIT:-all}, fewshot=${GSM8K_NUM_FEWSHOT})
 ISL/OSL/CONC : ${ISL_LIST} / ${OSL} / ${CONC_LIST}
 LOG_ROOT: ${LOG_ROOT}
@@ -126,8 +119,7 @@ cat > "${LOG_ROOT}/scripts/prefill.sh" <<'PREFILL_EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "[prefill] IP=${NODE_IP} TP=${PREFILL_TP} port=${PREFILL_PORT} GPU=${PREFILL_GPU_IDS}"
-echo "[prefill] EAGLE3: draft=${DRAFT_MODEL_PATH} spec_tokens=${NUM_SPEC_TOKENS}"
+echo "[prefill-eagle3] IP=${NODE_IP} TP=${PREFILL_TP} port=${PREFILL_PORT} GPU=${PREFILL_GPU_IDS}"
 
 mkdir -p /workspace/logs
 
@@ -158,7 +150,7 @@ python3 -m atom.entrypoints.openai_server \
     --method eagle3 \
     --draft-model "${DRAFT_MODEL_PATH}" \
     --num-speculative-tokens "${NUM_SPEC_TOKENS}" \
-    ${HF_OVERRIDE_ARGS} \
+    --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
     ${EXTRA_SERVER_ARGS} \
     2>&1 | tee /workspace/logs/prefill.log
 PREFILL_EOF
@@ -167,8 +159,7 @@ cat > "${LOG_ROOT}/scripts/decode.sh" <<'DECODE_EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "[decode] IP=${NODE_IP} TP=${DECODE_TP} port=${DECODE_PORT} GPU=${DECODE_GPU_IDS}"
-echo "[decode] EAGLE3: draft=${DRAFT_MODEL_PATH} spec_tokens=${NUM_SPEC_TOKENS}"
+echo "[decode-eagle3] IP=${NODE_IP} TP=${DECODE_TP} port=${DECODE_PORT} GPU=${DECODE_GPU_IDS}"
 
 mkdir -p /workspace/logs
 
@@ -200,7 +191,7 @@ python3 -m atom.entrypoints.openai_server \
     --method eagle3 \
     --draft-model "${DRAFT_MODEL_PATH}" \
     --num-speculative-tokens "${NUM_SPEC_TOKENS}" \
-    ${HF_OVERRIDE_ARGS} \
+    --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
     ${EXTRA_SERVER_ARGS} \
     2>&1 | tee /workspace/logs/decode.log
 DECODE_EOF
@@ -281,7 +272,7 @@ result_file = max(json_files, key=lambda p: p.stat().st_mtime)
 data = json.load(open(result_file))
 score = data.get('results', {}).get('gsm8k', {}).get('exact_match,flexible-extract', 'N/A')
 print('=========================================')
-print(f'[gsm8k] concurrent=${GSM8K_CONC} exact_match,flexible-extract = {score}')
+print(f'[gsm8k-eagle3] concurrent=${GSM8K_CONC} exact_match,flexible-extract = {score}')
 print('=========================================')
 print(json.dumps(data.get('results', {}), indent=2))
 "
@@ -392,7 +383,6 @@ for script in "${LOG_ROOT}"/scripts/*.sh; do
         -e "s|\${PREFILL_GPU_IDS}|${PREFILL_GPU_IDS}|g" \
         -e "s|\${DECODE_GPU_IDS}|${DECODE_GPU_IDS}|g" \
         -e "s|\${EXTRA_SERVER_ARGS}|${EXTRA_SERVER_ARGS}|g" \
-        -e "s|\${HF_OVERRIDE_ARGS}|${HF_OVERRIDE_ARGS[*]}|g" \
         -e "s|\${ISL_LIST}|${ISL_LIST}|g" \
         -e "s|\${OSL}|${OSL}|g" \
         -e "s|\${CONC_LIST}|${CONC_LIST}|g" \

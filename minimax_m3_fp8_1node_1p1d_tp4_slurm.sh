@@ -12,8 +12,7 @@
 #SBATCH --output=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_fp8_1node_1p1d_tp4-%j.out
 #SBATCH --error=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_fp8_1node_1p1d_tp4-%j.err
 #
-# Single-node 1P+1D PD-disaggregated benchmark for MiniMax-M3-MXFP4 with FP8
-# online quantization on ATOM.
+# Single-node 1P+1D PD-disaggregated benchmark for MiniMax-M3-MXFP4 FP8 on ATOM.
 #   prefill: GPU 0-3 (TP=4, port 8010)
 #   decode:  GPU 4-7 (TP=4, port 8020)
 #   router:  port 8000
@@ -43,12 +42,6 @@ MAX_NUM_SEQS="${MAX_NUM_SEQS:-256}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-32768}"
 EXTRA_SERVER_ARGS="${EXTRA_SERVER_ARGS:-}"
 
-DEFAULT_HF_OVERRIDES='{"use_index_cache": true, "index_topk_freq": 4}'
-HF_OVERRIDES="${HF_OVERRIDES:-${DEFAULT_HF_OVERRIDES}}"
-HF_OVERRIDE_ARGS=()
-if [[ -n "${HF_OVERRIDES}" ]]; then
-    HF_OVERRIDE_ARGS=(--hf-overrides "${HF_OVERRIDES}")
-fi
 
 ISL_LIST="${ISL_LIST:-8192}"
 OSL="${OSL:-1024}"
@@ -150,7 +143,7 @@ python3 -m atom.entrypoints.openai_server \
     --online_quant_config '{"global_quant_config": "ptpc_fp8", "exclude_layer": ["lm_head", "model.embed_tokens", "vision_tower", "multi_modal_projector", "patch_merge_mlp", "*.gate.*", "*.block_sparse_moe.experts*"]}' \
     --kv-transfer-config '{"kv_role":"kv_producer","kv_connector":"mooncake","proxy_ip":"${NODE_IP}","handshake_port":${HANDSHAKE_PORT}}' \
     --no-enable_prefix_caching \
-    ${HF_OVERRIDE_ARGS} \
+    --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
     ${EXTRA_SERVER_ARGS} \
     2>&1 | tee /workspace/logs/prefill.log
 PREFILL_EOF
@@ -188,7 +181,7 @@ python3 -m atom.entrypoints.openai_server \
     --kv-transfer-config '{"kv_role":"kv_consumer","kv_connector":"mooncake","proxy_ip":"${NODE_IP}","handshake_port":${HANDSHAKE_PORT}}' \
     --cudagraph-capture-sizes "[1,8,16,24,32,40,48,56,64,72,80,88,96,104,112,120,128,136,144,152,160,168,176,184,192,200,208,216,224,232,240,248,256]" \
     --no-enable_prefix_caching \
-    ${HF_OVERRIDE_ARGS} \
+    --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
     ${EXTRA_SERVER_ARGS} \
     2>&1 | tee /workspace/logs/decode.log
 DECODE_EOF
@@ -378,7 +371,6 @@ for script in "${LOG_ROOT}"/scripts/*.sh; do
         -e "s|\${PREFILL_GPU_IDS}|${PREFILL_GPU_IDS}|g" \
         -e "s|\${DECODE_GPU_IDS}|${DECODE_GPU_IDS}|g" \
         -e "s|\${EXTRA_SERVER_ARGS}|${EXTRA_SERVER_ARGS}|g" \
-        -e "s|\${HF_OVERRIDE_ARGS}|${HF_OVERRIDE_ARGS[*]}|g" \
         -e "s|\${ISL_LIST}|${ISL_LIST}|g" \
         -e "s|\${OSL}|${OSL}|g" \
         -e "s|\${CONC_LIST}|${CONC_LIST}|g" \
