@@ -9,7 +9,7 @@
 #SBATCH --gres=gpu:8
 #SBATCH --exclusive
 #SBATCH --time=04:00:00
-#SBATCH --nodelist=mia1-p02-g44
+#SBATCH --nodelist=mia1-p02-g42
 #SBATCH --output=/it-share/yajizhan/slurm_glm51_logs/glm51_1node_1p1d_tp4-%j.out
 #SBATCH --error=/it-share/yajizhan/slurm_glm51_logs/glm51_1node_1p1d_tp4-%j.err
 #
