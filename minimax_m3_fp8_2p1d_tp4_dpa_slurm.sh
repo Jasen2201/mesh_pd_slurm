@@ -129,7 +129,6 @@ export PYTHONUNBUFFERED=1
 export HSA_NO_SCRATCH_RECLAIM=1
 export AITER_QUICK_REDUCE_QUANTIZATION=INT4
 export ATOM_FORCE_ATTN_TRITON=1
-export AITER_QUICK_REDUCE_CAST_BF16_TO_FP16=0
 export ATOM_HOST_IP=__PREFILL_HANDSHAKE_IP__
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 
@@ -169,7 +168,6 @@ export PYTHONUNBUFFERED=1
 export HSA_NO_SCRATCH_RECLAIM=1
 export AITER_QUICK_REDUCE_QUANTIZATION=INT4
 export ATOM_FORCE_ATTN_TRITON=1
-export AITER_QUICK_REDUCE_CAST_BF16_TO_FP16=0
 export ATOM_HOST_IP=${DECODE_IP}
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 
