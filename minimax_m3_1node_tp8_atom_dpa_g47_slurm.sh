@@ -25,7 +25,7 @@ set -euo pipefail
 
 # ======================== configuration ========================
 MODEL_PATH="${MODEL_PATH:-/mnt/models/MiniMax-M3-MXFP4}"
-DOCKER_IMAGE="${DOCKER_IMAGE:-rocm/atom-dev:MiniMax-M3-20260623}"
+DOCKER_IMAGE="${DOCKER_IMAGE:-rocm/atom-dev:MiniMax-M3-20260624}"
 CONTAINER="${CONTAINER:-atom_minimax_m3_1node_dpa_g47_${SLURM_JOB_ID}}"
 
 SERVER_TP="${SERVER_TP:-8}"
@@ -104,6 +104,9 @@ export HIP_VISIBLE_DEVICES=${GPU_IDS}
 export PYTHONUNBUFFERED=1
 export HSA_NO_SCRATCH_RECLAIM=1
 export ATOM_M3_SPARSE_USE_ASM_PA=1
+export AITER_QUICK_REDUCE_QUANTIZATION=INT4
+export ATOM_ENABLE_ALLREDUCE_RMSNORM_FUSION=1
+export AITER_QUICK_REDUCE_CAST_BF16_TO_FP16=0
 export ATOM_HOST_IP=${NODE_IP}
 export LD_LIBRARY_PATH=\$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:\${LD_LIBRARY_PATH:-}
 

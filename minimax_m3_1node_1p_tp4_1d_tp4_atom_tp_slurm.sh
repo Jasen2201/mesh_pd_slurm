@@ -27,7 +27,7 @@ set -euo pipefail
 
 # ======================== configuration ========================
 MODEL_PATH="${MODEL_PATH:-/mnt/models/MiniMax-M3-MXFP4}"
-DOCKER_IMAGE="${DOCKER_IMAGE:-rocm/atom-dev:MiniMax-M3-20260623}"
+DOCKER_IMAGE="${DOCKER_IMAGE:-rocm/atom-dev:MiniMax-M3-20260624}"
 CONTAINER="${CONTAINER:-atom_mesh_minimax_m3_1node_1p1d_tp4_${SLURM_JOB_ID}}"
 
 PREFILL_TP="${PREFILL_TP:-4}"
@@ -43,6 +43,14 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-256}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-32768}"
 EXTRA_SERVER_ARGS="${EXTRA_SERVER_ARGS:-}"
+# KV cache dtype. Empty (default) = no flag = known-good accuracy (~94% GSM8K).
+# Set KV_CACHE_DTYPE=fp8 to reproduce the accuracy-breaking config (~2% GSM8K).
+KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-}"
+if [[ -n "${KV_CACHE_DTYPE}" ]]; then
+    KV_CACHE_DTYPE_ARG="--kv_cache_dtype ${KV_CACHE_DTYPE}"
+else
+    KV_CACHE_DTYPE_ARG=""
+fi
 
 ISL_LIST="${ISL_LIST:-8192}"
 OSL="${OSL:-1024}"
@@ -125,6 +133,9 @@ export PYTHONUNBUFFERED=1
 export AITER_LOG_LEVEL=WARNING
 export HSA_NO_SCRATCH_RECLAIM=1
 export ATOM_M3_SPARSE_USE_ASM_PA=1
+export AITER_QUICK_REDUCE_QUANTIZATION=INT4
+export ATOM_ENABLE_ALLREDUCE_RMSNORM_FUSION=1
+export AITER_QUICK_REDUCE_CAST_BF16_TO_FP16=0
 export ATOM_HOST_IP=${NODE_IP}
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 
@@ -135,6 +146,7 @@ python3 -m atom.entrypoints.openai_server \
     --host 0.0.0.0 --server-port "${PREFILL_PORT}" \
     --trust-remote-code \
     --tensor-parallel-size "${PREFILL_TP}" \
+    ${KV_CACHE_DTYPE_ARG} \
     --gpu-memory-utilization "${MEM_FRACTION}" \
     --block-size "${BLOCK_SIZE}" \
     --max-model-len "${MAX_MODEL_LEN}" \
@@ -159,6 +171,9 @@ export PYTHONUNBUFFERED=1
 export AITER_LOG_LEVEL=WARNING
 export HSA_NO_SCRATCH_RECLAIM=1
 export ATOM_M3_SPARSE_USE_ASM_PA=1
+export AITER_QUICK_REDUCE_QUANTIZATION=INT4
+export ATOM_ENABLE_ALLREDUCE_RMSNORM_FUSION=1
+export AITER_QUICK_REDUCE_CAST_BF16_TO_FP16=0
 export ATOM_HOST_IP=${NODE_IP}
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 
@@ -169,6 +184,7 @@ python3 -m atom.entrypoints.openai_server \
     --host 0.0.0.0 --server-port "${DECODE_PORT}" \
     --trust-remote-code \
     --tensor-parallel-size "${DECODE_TP}" \
+    ${KV_CACHE_DTYPE_ARG} \
     --gpu-memory-utilization "${MEM_FRACTION}" \
     --block-size "${BLOCK_SIZE}" \
     --max-model-len "${MAX_MODEL_LEN}" \
@@ -234,12 +250,13 @@ for GSM8K_CONC in "${GSM8K_CONCS[@]}"; do
     echo "========================================="
 
     lm_eval --model local-chat-completions \
-        --model_args "model=${MODEL_PATH},base_url=http://127.0.0.1:${ROUTER_PORT}/v1/chat/completions,num_concurrent=${GSM8K_CONC},max_retries=3,max_gen_toks=${GSM8K_MAX_GEN_TOKS}" \
+        --model_args "model=${MODEL_PATH},base_url=http://127.0.0.1:${ROUTER_PORT}/v1/chat/completions,api_key=EMPTY,eos_string=</s>,max_retries=5,num_concurrent=${GSM8K_CONC},timeout=1800,tokenized_requests=False,max_length=32768" \
         --tasks gsm8k \
         --num_fewshot "${GSM8K_NUM_FEWSHOT}" \
-        --batch_size "${GSM8K_BATCH_SIZE}" \
         --apply_chat_template \
         --fewshot_as_multiturn \
+        --log_samples \
+        --gen_kwargs "max_tokens=${GSM8K_MAX_GEN_TOKS},temperature=0,top_p=1" \
         ${LIMIT_ARG} \
         --output_path "${RESULT_DIR}/${RUN_TAG}"
 
@@ -366,6 +383,7 @@ for script in "${LOG_ROOT}"/scripts/*.sh; do
         -e "s|\${PREFILL_GPU_IDS}|${PREFILL_GPU_IDS}|g" \
         -e "s|\${DECODE_GPU_IDS}|${DECODE_GPU_IDS}|g" \
         -e "s|\${EXTRA_SERVER_ARGS}|${EXTRA_SERVER_ARGS}|g" \
+        -e "s|\${KV_CACHE_DTYPE_ARG}|${KV_CACHE_DTYPE_ARG}|g" \
         -e "s|\${ISL_LIST}|${ISL_LIST}|g" \
         -e "s|\${OSL}|${OSL}|g" \
         -e "s|\${CONC_LIST}|${CONC_LIST}|g" \

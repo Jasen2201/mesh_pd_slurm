@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=minimax-m3-mxfp8-1node-1p1d-tp4-eagle3
-#SBATCH --account=amd-tw
-#SBATCH --partition=amd-tw
+#SBATCH --account=amd-frameworks
+#SBATCH --partition=amd-frameworks
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --ntasks-per-node=1
@@ -9,7 +9,7 @@
 #SBATCH --gres=gpu:8
 #SBATCH --exclusive
 #SBATCH --time=04:00:00
-#SBATCH --nodelist=mia1-p01-g43
+#SBATCH --nodelist=mia1-p02-g44
 #SBATCH --output=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_mxfp8_1node_1p1d_tp4_eagle3-%j.out
 #SBATCH --error=/it-share/yajizhan/slurm_minimax_logs/minimax_m3_mxfp8_1node_1p1d_tp4_eagle3-%j.err
 #
@@ -29,7 +29,7 @@ set -euo pipefail
 MODEL_PATH="${MODEL_PATH:-/mnt/models/MiniMax-M3-MXFP8}"
 DRAFT_MODEL_PATH="${DRAFT_MODEL_PATH:-/mnt/models/MiniMax-M3-EAGLE3}"
 NUM_SPEC_TOKENS="${NUM_SPEC_TOKENS:-3}"
-DOCKER_IMAGE="${DOCKER_IMAGE:-rocm/atom-dev:MiniMax-M3-20260623}"
+DOCKER_IMAGE="${DOCKER_IMAGE:-rocm/atom-dev:MiniMax-M3-20260624}"
 CONTAINER="${CONTAINER:-atom_mesh_minimax_m3_mxfp8_1node_1p1d_tp4_eagle3_${SLURM_JOB_ID}}"
 
 PREFILL_TP="${PREFILL_TP:-4}"
@@ -130,6 +130,9 @@ export PYTHONUNBUFFERED=1
 export AITER_LOG_LEVEL=WARNING
 export HSA_NO_SCRATCH_RECLAIM=1
 export ATOM_M3_SPARSE_USE_ASM_PA=1
+export AITER_QUICK_REDUCE_QUANTIZATION=INT4
+export ATOM_ENABLE_ALLREDUCE_RMSNORM_FUSION=1
+export AITER_QUICK_REDUCE_CAST_BF16_TO_FP16=0
 export ATOM_HOST_IP=${NODE_IP}
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 
@@ -168,6 +171,9 @@ export PYTHONUNBUFFERED=1
 export AITER_LOG_LEVEL=WARNING
 export HSA_NO_SCRATCH_RECLAIM=1
 export ATOM_M3_SPARSE_USE_ASM_PA=1
+export AITER_QUICK_REDUCE_QUANTIZATION=INT4
+export ATOM_ENABLE_ALLREDUCE_RMSNORM_FUSION=1
+export AITER_QUICK_REDUCE_CAST_BF16_TO_FP16=0
 export ATOM_HOST_IP=${NODE_IP}
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 

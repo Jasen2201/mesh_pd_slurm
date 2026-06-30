@@ -25,7 +25,7 @@ set -euo pipefail
 
 # ======================== configuration ========================
 MODEL_PATH="${MODEL_PATH:-/mnt/models/MiniMax-M3-MXFP4}"
-DOCKER_IMAGE="${DOCKER_IMAGE:-rocm/atom-dev:MiniMax-M3-20260623}"
+DOCKER_IMAGE="${DOCKER_IMAGE:-rocm/atom-dev:MiniMax-M3-20260624}"
 CONTAINER="${CONTAINER:-atom_mesh_minimax_m3_1p1d_tp4_${SLURM_JOB_ID}}"
 
 PREFILL_TP="${PREFILL_TP:-4}"
@@ -132,6 +132,9 @@ export PYTHONUNBUFFERED=1
 export AITER_LOG_LEVEL=WARNING
 export HSA_NO_SCRATCH_RECLAIM=1
 export ATOM_M3_SPARSE_USE_ASM_PA=1
+export AITER_QUICK_REDUCE_QUANTIZATION=INT4
+export ATOM_ENABLE_ALLREDUCE_RMSNORM_FUSION=1
+export AITER_QUICK_REDUCE_CAST_BF16_TO_FP16=0
 export ATOM_HOST_IP=${PREFILL_IP}
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 
@@ -166,6 +169,9 @@ export PYTHONUNBUFFERED=1
 export AITER_LOG_LEVEL=WARNING
 export HSA_NO_SCRATCH_RECLAIM=1
 export ATOM_M3_SPARSE_USE_ASM_PA=1
+export AITER_QUICK_REDUCE_QUANTIZATION=INT4
+export ATOM_ENABLE_ALLREDUCE_RMSNORM_FUSION=1
+export AITER_QUICK_REDUCE_CAST_BF16_TO_FP16=0
 export ATOM_HOST_IP=${DECODE_IP}
 export LD_LIBRARY_PATH=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))")/mooncake:/opt/rocm/lib:${LD_LIBRARY_PATH:-}
 
