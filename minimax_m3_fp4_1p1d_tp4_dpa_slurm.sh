@@ -150,6 +150,7 @@ python3 -m atom.entrypoints.openai_server \
     --max-model-len "${MAX_MODEL_LEN}" \
     --max-num-seqs "${MAX_NUM_SEQS}" \
     --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}" \
+    --online_quant_config '{"global_quant_config": "ptpc_fp8", "exclude_layer": ["lm_head", "model.embed_tokens", "vision_tower", "multi_modal_projector", "patch_merge_mlp", "*block_sparse_moe"]}' \
     --kv-transfer-config '{"kv_role":"kv_producer","kv_connector":"mooncake","proxy_ip":"${PREFILL_IP}","handshake_port":${HANDSHAKE_PORT}}' \
     --no-enable_prefix_caching \
     --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' \
@@ -186,6 +187,7 @@ python3 -m atom.entrypoints.openai_server \
     --max-model-len "${MAX_MODEL_LEN}" \
     --max-num-seqs "${MAX_NUM_SEQS}" \
     --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}" \
+    --online_quant_config '{"global_quant_config": "ptpc_fp8", "exclude_layer": ["lm_head", "model.embed_tokens", "vision_tower", "multi_modal_projector", "patch_merge_mlp", "*block_sparse_moe"]}' \
     --kv-transfer-config '{"kv_role":"kv_consumer","kv_connector":"mooncake","proxy_ip":"${DECODE_IP}","handshake_port":${HANDSHAKE_PORT}}' \
     --cudagraph-capture-sizes "[1,2,4,8,16,24,32,40,48,56,64,72,80,88,96,104,112,120,128,136,144,152,160,168,176,184,192,200,208,216,224,232,240,248,256]" \
     --no-enable_prefix_caching \
