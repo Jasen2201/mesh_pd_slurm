@@ -25,7 +25,7 @@
 set -euo pipefail
 
 # ======================== configuration ========================
-MODEL_PATH="${MODEL_PATH:-/mnt/models/MiniMax-M3-MXFP4}"
+MODEL_PATH="${MODEL_PATH:-/mnt/models/MiniMax-M3-MXFP8}"
 DRAFT_MODEL_PATH="${DRAFT_MODEL_PATH:-/mnt/models/MiniMax-M3-EAGLE3}"
 NUM_SPEC_TOKENS="${NUM_SPEC_TOKENS:-3}"
 DOCKER_IMAGE="${DOCKER_IMAGE:-rocm/atom-dev:MiniMax-M3-20260630}"
